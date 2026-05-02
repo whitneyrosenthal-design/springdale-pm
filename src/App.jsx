@@ -86,6 +86,8 @@ export default function App() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [showDecisions, setShowDecisions] = useState(false);
+  const [decisions, setDecisions] = useState([]);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -96,6 +98,7 @@ export default function App() {
   useEffect(() => {
     if (user) {
       loadHistory();
+      loadDecisions();
       inputRef.current?.focus();
     }
   }, [user]);
@@ -107,7 +110,7 @@ export default function App() {
         .from("messages")
         .select("*")
         .order("created_at", { ascending: true })
-        .limit(100);
+        .limit(200);
       if (!error && data) {
         const loaded = data.map((row) => ({
           id: row.id,
@@ -124,6 +127,19 @@ export default function App() {
     setLoadingHistory(false);
   };
 
+  const loadDecisions = async () => {
+    try {
+      const { data, error } = await supabase
+        .from("decisions")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(100);
+      if (!error && data) setDecisions(data);
+    } catch (e) {
+      console.error("Decisions load error:", e);
+    }
+  };
+
   const saveMessage = async (role, content, userName) => {
     try {
       await supabase.from("messages").insert({
@@ -136,8 +152,42 @@ export default function App() {
     }
   };
 
+  const saveDecision = async ({ category, decision, cost_impact, needs_signoff, source, logged_by }) => {
+    try {
+      await supabase.from("decisions").insert({
+        category: category || "other",
+        decision,
+        cost_impact: cost_impact || null,
+        needs_signoff: !!needs_signoff,
+        source: source || "auto",
+        logged_by: logged_by || user,
+      });
+      loadDecisions();
+    } catch (e) {
+      console.error("Decision save error:", e);
+    }
+  };
+
+  // Parses [LOG_DECISION] tags from RENO's responses, returns clean text + decisions array
+  const extractDecisions = (text) => {
+    const tagRegex = /\[LOG_DECISION\]\s+category="([^"]*)"\s+cost="([^"]*)"\s+signoff="([^"]*)"\s+decision="([^"]*)"/g;
+    const found = [];
+    let match;
+    while ((match = tagRegex.exec(text)) !== null) {
+      found.push({
+        category: match[1],
+        cost_impact: match[2] ? parseFloat(match[2]) : null,
+        needs_signoff: match[3] === "true",
+        decision: match[4],
+        source: "auto",
+      });
+    }
+    const cleanText = text.replace(tagRegex, "").trim();
+    return { cleanText, decisions: found };
+  };
+
   const buildApiMessages = (history, newMsg, currentUser) => {
-    const recent = history.slice(-40);
+    const recent = history.slice(-80);
     const apiMsgs = recent.map((m) => ({
       role: m.role,
       content: m.role === "user" ? `[${m.user}]: ${m.content}` : m.content,
@@ -146,9 +196,39 @@ export default function App() {
     return apiMsgs;
   };
 
+  const handleManualLog = async (text) => {
+    const decisionText = text.replace(/^\/log\s+/i, "").trim();
+    if (!decisionText) return false;
+    await saveDecision({
+      category: "manual",
+      decision: decisionText,
+      source: "manual",
+      logged_by: user,
+    });
+    const confirmMsg = {
+      role: "assistant",
+      content: `📌 Logged to decision register: "${decisionText}"`,
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, confirmMsg]);
+    await saveMessage("assistant", confirmMsg.content, "RENO");
+    return true;
+  };
+
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
     const text = input.trim();
+
+    // Manual /log command intercept
+    if (text.toLowerCase().startsWith("/log ")) {
+      const userMsg = { role: "user", content: text, user, timestamp: new Date() };
+      setMessages((prev) => [...prev, userMsg]);
+      await saveMessage("user", text, user);
+      setInput("");
+      await handleManualLog(text);
+      return;
+    }
+
     const userMsg = { role: "user", content: text, user, timestamp: new Date() };
     const newMessages = [...messages, userMsg];
     setMessages(newMessages);
@@ -159,18 +239,25 @@ export default function App() {
 
     try {
       const response = await fetch(ANTHROPIC_API, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    system: PROJECT_CONTEXT,
-    messages: buildApiMessages(messages, text, user),
-  }),
-});
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system: PROJECT_CONTEXT,
+          messages: buildApiMessages(messages, text, user),
+        }),
+      });
       const data = await response.json();
-      const reply = data.content?.[0]?.text || "Sorry, I couldn't generate a response.";
-      const assistantMsg = { role: "assistant", content: reply, timestamp: new Date() };
+      const rawReply = data.content?.[0]?.text || "Sorry, I couldn't generate a response.";
+      const { cleanText, decisions: autoDecisions } = extractDecisions(rawReply);
+
+      // Save any auto-detected decisions
+      for (const d of autoDecisions) {
+        await saveDecision({ ...d, logged_by: user });
+      }
+
+      const assistantMsg = { role: "assistant", content: cleanText, timestamp: new Date() };
       setMessages((prev) => [...prev, assistantMsg]);
-      await saveMessage("assistant", reply, "RENO");
+      await saveMessage("assistant", cleanText, "RENO");
     } catch (err) {
       const errMsg = { role: "assistant", content: "Connection error — please try again.", timestamp: new Date() };
       setMessages((prev) => [...prev, errMsg]);
@@ -268,6 +355,7 @@ export default function App() {
         .send-btn:disabled { opacity: 0.35; cursor: not-allowed; }
         .quick-btn:hover { background: #2e2a26 !important; color: #c4a882 !important; border-color: #c4a882 !important; }
         .switch-btn:hover { opacity: 0.6; }
+        .panel-btn:hover { color: #c4a882 !important; }
         textarea:focus { outline: none; }
         @keyframes pulse { 0%,80%,100%{opacity:0.2;transform:scale(0.8)} 40%{opacity:1;transform:scale(1)} }
       `}</style>
@@ -281,6 +369,9 @@ export default function App() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <button className="panel-btn" onClick={() => { setShowDecisions(true); loadDecisions(); }} style={{ background: "none", border: "1px solid #2a2622", borderRadius: "20px", padding: "5px 11px", color: "#7a6e62", fontSize: "11px", letterSpacing: "0.08em", cursor: "pointer", fontFamily: "'Lato', sans-serif", transition: "color 0.15s" }}>
+            📋 LOG ({decisions.length})
+          </button>
           <div style={{ background: `${userConf.color}18`, border: `1px solid ${userConf.color}44`, borderRadius: "20px", padding: "4px 12px 4px 7px", display: "flex", alignItems: "center", gap: "7px" }}>
             <div style={{ width: "20px", height: "20px", borderRadius: "50%", background: userConf.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", fontWeight: 700, color: "#1a1714" }}>{userConf.initial}</div>
             <span style={{ fontSize: "13px", color: userConf.accent }}>{user}</span>
@@ -317,8 +408,11 @@ export default function App() {
           <div style={{ textAlign: "center", padding: "40px 16px" }}>
             <div style={{ fontSize: "30px", marginBottom: "14px" }}>🏛</div>
             <p style={{ color: "#5a5248", fontFamily: "'Playfair Display', serif", fontSize: "16px", marginBottom: "6px" }}>Morning, {user}.</p>
-            <p style={{ color: "#3a3530", fontSize: "13px", maxWidth: "300px", margin: "0 auto 24px", lineHeight: 1.65 }}>
-              I have full context on the Springdale Road project. What do you need?
+            <p style={{ color: "#3a3530", fontSize: "13px", maxWidth: "320px", margin: "0 auto 18px", lineHeight: 1.65 }}>
+              I have full context on the Springdale Road project, including all logged decisions. What do you need?
+            </p>
+            <p style={{ color: "#2e2a26", fontSize: "11px", maxWidth: "320px", margin: "0 auto 24px", lineHeight: 1.5 }}>
+              Tip: type <code style={{ background: "#252118", padding: "1px 5px", borderRadius: "3px", color: "#c4a882" }}>/log</code> followed by a decision to record it manually.
             </p>
             <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", justifyContent: "center", maxWidth: "380px", margin: "0 auto" }}>
               {[
@@ -399,7 +493,7 @@ export default function App() {
               e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
             }}
             onKeyDown={handleKey}
-            placeholder={`Message as ${user}…`}
+            placeholder={`Message as ${user}…  (or /log <decision>)`}
             rows={1}
             style={{ flex: 1, background: "none", border: "none", color: "#e0d5c5", fontSize: "14px", lineHeight: 1.5, fontFamily: "'Lato', sans-serif", fontWeight: 300, maxHeight: "120px", overflow: "auto" }}
           />
@@ -408,9 +502,45 @@ export default function App() {
           </button>
         </div>
         <div style={{ textAlign: "center", marginTop: "6px", fontSize: "10px", color: "#2e2a26", letterSpacing: "0.08em" }}>
-          Shared history · Whitney & Charlie · Enter to send
+          Shared history · Whitney & Charlie · Decisions auto-logged
         </div>
       </div>
+
+      {showDecisions && (
+        <div onClick={() => setShowDecisions(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", justifyContent: "flex-end" }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "min(440px, 100%)", height: "100%", background: "#1d1a17", borderLeft: "1px solid #2a2622", display: "flex", flexDirection: "column", animation: "fadeUp 0.2s ease" }}>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid #2a2622", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "16px", color: "#f0e6d3", fontWeight: 600 }}>Decision Log</div>
+                <div style={{ fontSize: "10px", color: "#5a5248", letterSpacing: "0.1em", marginTop: "2px" }}>{decisions.length} ENTRIES · ALL TIME</div>
+              </div>
+              <button onClick={() => setShowDecisions(false)} style={{ background: "none", border: "none", color: "#7a6e62", fontSize: "20px", cursor: "pointer", padding: "0 6px" }}>×</button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
+              {decisions.length === 0 && (
+                <div style={{ textAlign: "center", padding: "40px 20px", color: "#4a4440", fontSize: "12px" }}>
+                  No decisions logged yet.<br /><br />Decisions will appear here automatically as they're made in conversation, or use <code style={{ background: "#252118", padding: "1px 5px", borderRadius: "3px", color: "#c4a882" }}>/log</code> to add one manually.
+                </div>
+              )}
+              {decisions.map((d) => (
+                <div key={d.id} style={{ background: "#201e1a", border: "1px solid #2a2622", borderRadius: "6px", padding: "10px 12px", marginBottom: "8px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "8px", marginBottom: "5px" }}>
+                    <span style={{ fontSize: "10px", color: "#c4a882", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>{d.category || "other"}</span>
+                    <span style={{ fontSize: "10px", color: "#4a4440" }}>{new Date(d.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}</span>
+                  </div>
+                  <div style={{ fontSize: "13px", color: "#ccc3b5", lineHeight: 1.5, marginBottom: "6px" }}>{d.decision}</div>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", fontSize: "10px", color: "#5a5248" }}>
+                    <span>by {d.logged_by}</span>
+                    {d.cost_impact && <span style={{ color: "#c4a882" }}>· £{d.cost_impact}</span>}
+                    {d.needs_signoff && <span style={{ color: "#d49a82" }}>· ⚠️ NEEDS SIGN-OFF</span>}
+                    <span style={{ opacity: 0.5 }}>· {d.source === "manual" ? "manual" : "auto"}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
