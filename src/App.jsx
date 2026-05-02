@@ -5,7 +5,7 @@ const SUPABASE_URL = "https://fbfuxcpvqbvubaxmeatu.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZiZnV4Y3B2cWJ2dWJheG1lYXR1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3MDc3NDYsImV4cCI6MjA5MzI4Mzc0Nn0.lp8vkz6MbNcH4MAyo93jZgvbVESsohac9wWmbNQX5ao";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_API = "/.netlify/functions/chat";
 
 const PROJECT_CONTEXT = `You are RENO — a specialist AI project manager for a Victorian maisonette renovation in London. You are embedded in a private project management tool used exclusively by Whitney and Charlie, the two owners.
 
@@ -159,15 +159,13 @@ export default function App() {
 
     try {
       const response = await fetch(ANTHROPIC_API, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: PROJECT_CONTEXT,
-          messages: buildApiMessages(messages, text, user),
-        }),
-      });
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    system: PROJECT_CONTEXT,
+    messages: buildApiMessages(messages, text, user),
+  }),
+});
       const data = await response.json();
       const reply = data.content?.[0]?.text || "Sorry, I couldn't generate a response.";
       const assistantMsg = { role: "assistant", content: reply, timestamp: new Date() };
