@@ -183,6 +183,12 @@ export default function App() {
       });
     }
     const cleanText = text.replace(tagRegex, "").trim();
+    console.log("🔍 DECISION PARSER:", {
+      hasTag: text.includes("[LOG_DECISION]"),
+      rawTextLastChars: text.slice(-500),
+      decisionsFound: found.length,
+      decisions: found,
+    });
     return { cleanText, decisions: found };
   };
 
