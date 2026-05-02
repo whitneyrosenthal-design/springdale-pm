@@ -140,6 +140,9 @@ exports.handler = async (event) => {
     if (cache.budgetSheet) {
       driveBlock += `\n\n=== LIVE BUDGET SHEET (Google Sheet, latest version) ===\n${cache.budgetSheet}\n=== END BUDGET SHEET ===\n`;
       debug.budget_sheet_chars = cache.budgetSheet.length;
+      debug.budget_sheet_preview = cache.budgetSheet.slice(0, 200);
+    } else {
+      debug.budget_sheet_status = "null or empty";
     }
 
     let memoryBlock = "";
