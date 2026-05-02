@@ -176,11 +176,15 @@ export default function App() {
 
   // Parses [LOG_DECISION] tags from RENO's responses, returns clean text + decisions array
   const extractDecisions = (text) => {
-    const tagRegex = /\[LOG_DECISION\][^\[]*?category="([^"]*)"[^\[]*?cost="([^"]*)"[^\[]*?signoff="([^"]*)"[^\[]*?decision="((?:[^"\\]|\\.)*)"/g;
-    const found = [];
+    const decisionRegex = /\[LOG_DECISION\][^\[]*?category="([^"]*)"[^\[]*?cost="([^"]*)"[^\[]*?signoff="([^"]*)"[^\[]*?decision="((?:[^"\\]|\\.)*)"/g;
+    const lineItemRegex = /\[LOG_LINE_ITEM\][^\[]*?category="([^"]*)"[^\[]*?room="([^"]*)"[^\[]*?item="((?:[^"\\]|\\.)*)"[^\[]*?vendor="((?:[^"\\]|\\.)*)"[^\[]*?status="([^"]*)"[^\[]*?estimate="([^"]*)"[^\[]*?quote="([^"]*)"[^\[]*?actual="([^"]*)"[^\[]*?decided_by="([^"]*)"[^\[]*?notes="((?:[^"\\]|\\.)*)"/g;
+
+    const decisions = [];
+    const lineItems = [];
     let match;
-    while ((match = tagRegex.exec(text)) !== null) {
-      found.push({
+
+    while ((match = decisionRegex.exec(text)) !== null) {
+      decisions.push({
         category: match[1],
         cost_impact: match[2] ? parseFloat(match[2]) : null,
         needs_signoff: match[3] === "true",
@@ -188,14 +192,29 @@ export default function App() {
         source: "auto",
       });
     }
-    const cleanText = text.replace(tagRegex, "").trim();
-    console.log("🔍 DECISION PARSER:", {
-      hasTag: text.includes("[LOG_DECISION]"),
-      rawTextLastChars: text.slice(-500),
-      decisionsFound: found.length,
-      decisions: found,
-    });
-    return { cleanText, decisions: found };
+
+    while ((match = lineItemRegex.exec(text)) !== null) {
+      lineItems.push({
+        category: match[1],
+        room: match[2],
+        item: match[3],
+        vendor: match[4],
+        status: match[5],
+        estimate: match[6],
+        quote: match[7],
+        actual: match[8],
+        decided_by: match[9],
+        notes: match[10],
+      });
+    }
+
+    const cleanText = text
+      .replace(decisionRegex, "")
+      .replace(lineItemRegex, "")
+      .trim();
+
+    console.log("🔍 PARSER:", { decisions: decisions.length, lineItems: lineItems.length });
+    return { cleanText, decisions, lineItems };
   };
 
   const buildApiMessages = (history, newMsg, currentUser) => {
