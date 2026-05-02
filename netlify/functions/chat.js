@@ -16,9 +16,9 @@ try {
     googleAuth = new google.auth.GoogleAuth({
       credentials,
       scopes: [
-        "https://www.googleapis.com/auth/documents.readonly",
-        "https://www.googleapis.com/auth/spreadsheets.readonly",
-        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
       ],
     });
   }
@@ -73,41 +73,125 @@ const fetchBudgetSheet = async () => {
   }
 };
 
+// Append a one-line decision entry to the bottom of the master doc
+const appendDecisionToDoc = async (decision, loggedBy, costImpact, needsSignoff) => {
+  if (!googleAuth || !process.env.MASTER_DOC_ID) return { error: "no auth" };
+  try {
+    const docs = google.docs({ version: "v1", auth: googleAuth });
+    const docMeta = await docs.documents.get({ documentId: process.env.MASTER_DOC_ID });
+    const endIndex = docMeta.data.body.content[docMeta.data.body.content.length - 1].endIndex - 1;
+    const date = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+    const cost = costImpact ? ` – £${costImpact}` : "";
+    const flag = needsSignoff ? " ⚠️ NEEDS SIGN-OFF" : "";
+    const entry = `\n[${date}] ${loggedBy}: ${decision}${cost}${flag}`;
+    await docs.documents.batchUpdate({
+      documentId: process.env.MASTER_DOC_ID,
+      requestBody: {
+        requests: [{ insertText: { location: { index: endIndex }, text: entry } }],
+      },
+    });
+    return { ok: true };
+  } catch (e) {
+    console.error("Doc append error:", e.message);
+    return { error: e.message };
+  }
+};
+
+// Append a new row to the Line Items tab of the budget sheet
+const appendLineItemToSheet = async ({ category, room, item, vendor, status, estimate, quote, actual, decided_by, notes }) => {
+  if (!googleAuth || !process.env.BUDGET_SHEET_ID) return { error: "no auth" };
+  try {
+    const sheets = google.sheets({ version: "v4", auth: googleAuth });
+    const date = new Date().toLocaleDateString("en-GB");
+    const row = [
+      date,
+      category || "",
+      room || "",
+      item || "",
+      vendor || "",
+      status || "Estimating",
+      estimate || "",
+      quote || "",
+      actual || "",
+      20,
+      "",
+      decided_by || "",
+      notes || "",
+    ];
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: process.env.BUDGET_SHEET_ID,
+      range: "Line Items!A:M",
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [row] },
+    });
+    return { ok: true };
+  } catch (e) {
+    console.error("Sheet append error:", e.message);
+    return { error: e.message };
+  }
+};
+
 const LIVE_DATA_INSTRUCTION = `
 
 === LIVE DATA ACCESS (IMPORTANT) ===
-You have LIVE READ ACCESS to two Google files via this tool:
+You have LIVE READ AND WRITE ACCESS to two Google files via this tool:
 1. The master project document (injected above as "LIVE MASTER DOCUMENT")
 2. The budget spreadsheet (injected above as "LIVE BUDGET SHEET")
 
 Both documents are refreshed every ~60 seconds from Google Drive. When users ask about the master doc or budget sheet, READ THE INJECTED CONTENT ABOVE and reference it directly. You can quote from it, summarise sections, and answer specific questions about its contents.
 
-DO NOT claim you cannot access these documents — you can. The content is right there in your context, between the "===" markers.
+DO NOT claim you cannot access these documents — you can. The content is right there in your context.
 
-If a document section is missing or empty, say so honestly (e.g. "the budget sheet appears to be empty"). But do not say you have no integration when content is clearly present.
+If a document section is missing or empty, say so honestly. But do not say you have no integration when content is clearly present.
 === END LIVE DATA ACCESS ===
 `;
 
 const TAG_INSTRUCTION = `
 
-=== DECISION LOGGING (CRITICAL) ===
-You MUST detect when decisions, commitments, contractor choices, quotes, or material/spec selections are made in the conversation. When you detect one, you MUST append a structured tag to the END of your response on its own line.
+=== DECISION & COST LOGGING (CRITICAL) ===
+You MUST detect when decisions, commitments, contractor choices, quotes, or material/spec selections are made in the conversation. When detected, append structured tags to the END of your response, each on its own line.
 
-EXACT FORMAT (copy precisely):
+TAG 1 — DECISION TAG (always emit when a decision is made):
 [LOG_DECISION] category="<category>" cost="<number or empty>" signoff="<true or false>" decision="<short description>"
 
 Categories: structural | finishes | budget | contractor | timeline | sustainability | quote | other
-Set signoff="true" if the decision is over £500, structural, or aesthetically hard to reverse.
-You may emit multiple tags (one per line) if multiple decisions occurred.
-Emit the tag for ANY clear decision, even tentative ones — Whitney and Charlie need a paper trail.
+Set signoff="true" if over £500, structural, or aesthetically hard to reverse.
 
-DO NOT emit tags for general advice, suggestions you're proposing, or questions.
-=== END DECISION LOGGING ===
+TAG 2 — LINE ITEM TAG (emit ONLY when a specific cost/item is being committed to the budget — e.g. a quote received, an item ordered, a contractor booked):
+[LOG_LINE_ITEM] category="<one of the 7 budget categories below>" room="<room>" item="<item description>" vendor="<vendor or empty>" status="<status>" estimate="<number or empty>" quote="<number or empty>" actual="<number or empty>" decided_by="<Whitney|Charlie|Joint|RENO suggested>" notes="<optional notes>"
+
+Budget categories (use EXACT spelling): Structural / Kitchen / Doors | Garden Office | Basement / Bathroom / UFH | Joinery / Storage / Finishes | Tech / Electrical / V-Rads | Contingency | Rent overrun buffer
+
+Rooms: Ground Floor (Open Plan) | Kitchen | Basement | Bathroom | Bedroom 1 | Bedroom 2 | Bedroom 3 | Garden Office | Hallway / Storage | Whole property | External / Garden | Other
+
+Status: Estimating | Awaiting quote | Quoted | Approved | In progress | Paid | Cancelled
+
+WHEN TO EMIT LINE ITEM TAG:
+- A real quote has been received → emit with status="Quoted" and quote=<number>
+- An item has been ordered/booked → emit with status="Approved" or "In progress"
+- A specific cost estimate has been agreed → emit with status="Estimating" and estimate=<number>
+- DO NOT emit for general budget discussion or hypothetical numbers
+
+Both tags can be emitted in the same response if relevant.
+DO NOT emit tags for general advice, suggestions, or questions.
+=== END DECISION & COST LOGGING ===
 `;
 
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
     return { statusCode: 405, body: "Method not allowed" };
+  }
+
+  // Internal endpoint for the app to write to Drive
+  if (event.queryStringParameters?.action === "write_decision") {
+    const body = JSON.parse(event.body);
+    const result = await appendDecisionToDoc(body.decision, body.logged_by, body.cost_impact, body.needs_signoff);
+    return { statusCode: 200, body: JSON.stringify(result) };
+  }
+  if (event.queryStringParameters?.action === "write_line_item") {
+    const body = JSON.parse(event.body);
+    const result = await appendLineItemToSheet(body);
+    return { statusCode: 200, body: JSON.stringify(result) };
   }
 
   const debug = {
@@ -140,9 +224,6 @@ exports.handler = async (event) => {
     if (cache.budgetSheet) {
       driveBlock += `\n\n=== LIVE BUDGET SHEET (Google Sheet, latest version) ===\n${cache.budgetSheet}\n=== END BUDGET SHEET ===\n`;
       debug.budget_sheet_chars = cache.budgetSheet.length;
-      debug.budget_sheet_preview = cache.budgetSheet.slice(0, 200);
-    } else {
-      debug.budget_sheet_status = "null or empty";
     }
 
     let memoryBlock = "";
