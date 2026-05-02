@@ -5,7 +5,7 @@ const SUPABASE_URL = "https://fbfuxcpvqbvubaxmeatu.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZiZnV4Y3B2cWJ2dWJheG1lYXR1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc3MDc3NDYsImV4cCI6MjA5MzI4Mzc0Nn0.lp8vkz6MbNcH4MAyo93jZgvbVESsohac9wWmbNQX5ao";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-const ANTHROPIC_API = "/.netlify/functions/chat";
+const ANTHROPIC_API = "/api/chat";
 
 const PROJECT_CONTEXT = `You are RENO — a specialist AI project manager for a Victorian maisonette renovation in London. You are embedded in a private project management tool used exclusively by Whitney and Charlie, the two owners.
 
