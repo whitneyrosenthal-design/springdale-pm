@@ -282,10 +282,33 @@ export default function App() {
       const { cleanText, decisions: autoDecisions } = extractDecisions(rawReply);
 
       // Save any auto-detected decisions
-      console.log("💾 SAVING DECISIONS:", autoDecisions.length, autoDecisions);
+      const data = await response.json();
+      const rawReply = data.content?.[0]?.text || "Sorry, I couldn't generate a response.";
+      const { cleanText, decisions: autoDecisions, lineItems: autoLineItems } = extractDecisions(rawReply);
+
+      // Save decisions to Supabase + append to master doc
       for (const d of autoDecisions) {
-        const result = await saveDecision({ ...d, logged_by: user });
-        console.log("💾 SAVE RESULT:", result);
+        await saveDecision({ ...d, logged_by: user });
+        // Fire and forget the doc append
+        fetch(ANTHROPIC_API + "?action=write_decision", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            decision: d.decision,
+            logged_by: user,
+            cost_impact: d.cost_impact,
+            needs_signoff: d.needs_signoff,
+          }),
+        }).catch((e) => console.error("Doc write error:", e));
+      }
+
+      // Save line items to budget sheet
+      for (const li of autoLineItems) {
+        fetch(ANTHROPIC_API + "?action=write_line_item", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(li),
+        }).catch((e) => console.error("Sheet write error:", e));
       }
 
       const assistantMsg = { role: "assistant", content: cleanText, timestamp: new Date() };
