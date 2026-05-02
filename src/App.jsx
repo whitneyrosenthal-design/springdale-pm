@@ -174,7 +174,6 @@ export default function App() {
     }
   };
 
-  // Parses [LOG_DECISION] tags from RENO's responses, returns clean text + decisions array
   const extractDecisions = (text) => {
     const decisionRegex = /\[LOG_DECISION\][^\[]*?category="([^"]*)"[^\[]*?cost="([^"]*)"[^\[]*?signoff="([^"]*)"[^\[]*?decision="((?:[^"\\]|\\.)*)"/g;
     const lineItemRegex = /\[LOG_LINE_ITEM\][^\[]*?category="([^"]*)"[^\[]*?room="([^"]*)"[^\[]*?item="((?:[^"\\]|\\.)*)"[^\[]*?vendor="((?:[^"\\]|\\.)*)"[^\[]*?status="([^"]*)"[^\[]*?estimate="([^"]*)"[^\[]*?quote="([^"]*)"[^\[]*?actual="([^"]*)"[^\[]*?decided_by="([^"]*)"[^\[]*?notes="((?:[^"\\]|\\.)*)"/g;
@@ -236,6 +235,16 @@ export default function App() {
       source: "manual",
       logged_by: user,
     });
+    fetch(ANTHROPIC_API + "?action=write_decision", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        decision: decisionText,
+        logged_by: user,
+        cost_impact: null,
+        needs_signoff: false,
+      }),
+    }).catch((e) => console.error("Doc write error:", e));
     const confirmMsg = {
       role: "assistant",
       content: `📌 Logged to decision register: "${decisionText}"`,
@@ -250,7 +259,6 @@ export default function App() {
     if (!input.trim() || loading) return;
     const text = input.trim();
 
-    // Manual /log command intercept
     if (text.toLowerCase().startsWith("/log ")) {
       const userMsg = { role: "user", content: text, user, timestamp: new Date() };
       setMessages((prev) => [...prev, userMsg]);
@@ -279,17 +287,10 @@ export default function App() {
       });
       const data = await response.json();
       const rawReply = data.content?.[0]?.text || "Sorry, I couldn't generate a response.";
-      const { cleanText, decisions: autoDecisions } = extractDecisions(rawReply);
-
-      // Save any auto-detected decisions
-      const data = await response.json();
-      const rawReply = data.content?.[0]?.text || "Sorry, I couldn't generate a response.";
       const { cleanText, decisions: autoDecisions, lineItems: autoLineItems } = extractDecisions(rawReply);
 
-      // Save decisions to Supabase + append to master doc
       for (const d of autoDecisions) {
         await saveDecision({ ...d, logged_by: user });
-        // Fire and forget the doc append
         fetch(ANTHROPIC_API + "?action=write_decision", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -302,7 +303,6 @@ export default function App() {
         }).catch((e) => console.error("Doc write error:", e));
       }
 
-      // Save line items to budget sheet
       for (const li of autoLineItems) {
         fetch(ANTHROPIC_API + "?action=write_line_item", {
           method: "POST",
