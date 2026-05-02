@@ -217,7 +217,7 @@ export default function App() {
   };
 
   const buildApiMessages = (history, newMsg, currentUser) => {
-    const recent = history.slice(-80);
+    const recent = history.slice(-30);
     const apiMsgs = recent.map((m) => ({
       role: m.role,
       content: m.role === "user" ? `[${m.user}]: ${m.content}` : m.content,
