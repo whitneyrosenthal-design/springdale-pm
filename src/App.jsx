@@ -154,17 +154,23 @@ export default function App() {
 
   const saveDecision = async ({ category, decision, cost_impact, needs_signoff, source, logged_by }) => {
     try {
-      await supabase.from("decisions").insert({
+      const { data, error } = await supabase.from("decisions").insert({
         category: category || "other",
         decision,
         cost_impact: cost_impact || null,
         needs_signoff: !!needs_signoff,
         source: source || "auto",
         logged_by: logged_by || user,
-      });
+      }).select();
+      if (error) {
+        console.error("❌ Supabase insert error:", error);
+        return { error };
+      }
       loadDecisions();
+      return { data };
     } catch (e) {
-      console.error("Decision save error:", e);
+      console.error("❌ Decision save exception:", e);
+      return { error: e };
     }
   };
 
@@ -257,8 +263,10 @@ export default function App() {
       const { cleanText, decisions: autoDecisions } = extractDecisions(rawReply);
 
       // Save any auto-detected decisions
+      console.log("💾 SAVING DECISIONS:", autoDecisions.length, autoDecisions);
       for (const d of autoDecisions) {
-        await saveDecision({ ...d, logged_by: user });
+        const result = await saveDecision({ ...d, logged_by: user });
+        console.log("💾 SAVE RESULT:", result);
       }
 
       const assistantMsg = { role: "assistant", content: cleanText, timestamp: new Date() };
