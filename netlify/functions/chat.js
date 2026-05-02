@@ -73,6 +73,59 @@ const fetchBudgetSheet = async () => {
   }
 };
 
+// Extract Google Drive file IDs from a string
+const extractDriveFileIds = (text) => {
+  const patterns = [
+    /drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/g,
+    /drive\.google\.com\/open\?id=([a-zA-Z0-9_-]+)/g,
+    /docs\.google\.com\/[^/]+\/d\/([a-zA-Z0-9_-]+)/g,
+  ];
+  const ids = new Set();
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      ids.add(match[1]);
+    }
+  }
+  return Array.from(ids);
+};
+
+// Fetch a Drive file's bytes + metadata
+const fetchDriveFile = async (fileId) => {
+  if (!googleAuth) return null;
+  try {
+    const drive = google.drive({ version: "v3", auth: googleAuth });
+    const meta = await drive.files.get({
+      fileId,
+      fields: "id, name, mimeType, size",
+    });
+    const { name, mimeType, size } = meta.data;
+
+    // Skip if we can't handle this type
+    const supportedImage = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mimeType);
+    const isPdf = mimeType === "application/pdf";
+    if (!supportedImage && !isPdf) {
+      return { name, mimeType, error: `Unsupported type: ${mimeType}` };
+    }
+
+    // Skip large files
+    if (size && parseInt(size) > 10 * 1024 * 1024) {
+      return { name, mimeType, error: `File too large (${Math.round(size / 1024 / 1024)}MB, limit 10MB)` };
+    }
+
+    // Get file bytes
+    const fileRes = await drive.files.get(
+      { fileId, alt: "media" },
+      { responseType: "arraybuffer" }
+    );
+    const base64 = Buffer.from(fileRes.data).toString("base64");
+    return { name, mimeType, base64, isPdf };
+  } catch (e) {
+    console.error("Drive file fetch error:", e.message);
+    return { error: e.message };
+  }
+};
+
 const appendDecisionToDoc = async (decision, loggedBy, costImpact, needsSignoff) => {
   if (!googleAuth || !process.env.MASTER_DOC_ID) return { error: "no auth" };
   try {
@@ -129,22 +182,12 @@ const appendLineItemToSheet = async ({ category, room, item, vendor, status, est
   }
 };
 
-// Generate or update the rolling summary
 const generateSummary = async (existingSummary, messagesToFold) => {
-  const summaryPrompt = `You are summarising a renovation project chat conversation between Whitney, Charlie, and RENO (an AI project manager). Produce a concise rolling summary that captures:
+  const summaryPrompt = `You are summarising a renovation project chat conversation between Whitney, Charlie, and RENO. Produce a concise rolling summary (under 400 words, bullet points) capturing key topics, decisions, open questions, contractors mentioned, and any tensions. Do NOT repeat the decision log — focus on context and unresolved items.
 
-- Key topics discussed
-- Decisions made (and by whom)
-- Open questions / unresolved threads
-- Contractors / vendors mentioned
-- Tone and any tensions
-- Anything that would matter for future conversations
+${existingSummary ? `\nEXISTING SUMMARY (extend with the new messages below):\n${existingSummary}\n` : ""}
 
-Keep it under 400 words. Use bullet points. Do NOT repeat the entire decision log (it's stored separately) — focus on context, conversation threads, and unresolved items.
-
-${existingSummary ? `\nEXISTING SUMMARY (extend/update with the new messages below):\n${existingSummary}\n` : ""}
-
-NEW MESSAGES TO FOLD IN:
+NEW MESSAGES:
 ${messagesToFold.map((m) => `[${m.user_name}]: ${m.content}`).join("\n\n")}
 
 Write the updated summary now.`;
@@ -171,25 +214,25 @@ Write the updated summary now.`;
   }
 };
 
-const SUMMARY_THRESHOLD = 30; // Fold messages into summary every 30 new messages
+const SUMMARY_THRESHOLD = 30;
 
 const LIVE_DATA_INSTRUCTION = `
 
 === LIVE DATA ACCESS (IMPORTANT) ===
-You have LIVE READ AND WRITE ACCESS to two Google files via this tool:
-1. The master project document (injected above as "LIVE MASTER DOCUMENT")
-2. The budget spreadsheet (injected above as "LIVE BUDGET SHEET")
+You have LIVE READ AND WRITE ACCESS to two Google files:
+1. The master project document (injected as "LIVE MASTER DOCUMENT")
+2. The budget spreadsheet (injected as "LIVE BUDGET SHEET")
 
-Both documents are refreshed every ~60 seconds from Google Drive. When users ask about the master doc or budget sheet, READ THE INJECTED CONTENT ABOVE and reference it directly.
+You can ALSO read files from Google Drive when their URL is shared in the message — they will be attached as content blocks (images/PDFs) for you to actually see.
 
-DO NOT claim you cannot access these documents — you can.
+DO NOT claim you cannot access these documents — you can. The content is right there.
 === END LIVE DATA ACCESS ===
 `;
 
 const TAG_INSTRUCTION = `
 
 === DECISION & COST LOGGING (CRITICAL) ===
-You MUST detect when decisions, commitments, contractor choices, quotes, or material/spec selections are made. When detected, append structured tags to the END of your response, each on its own line.
+You MUST detect when decisions, commitments, contractor choices, quotes, or material/spec selections are made. Append structured tags to the END of your response, each on its own line.
 
 TAG 1 — DECISION TAG:
 [LOG_DECISION] category="<category>" cost="<number or empty>" signoff="<true or false>" decision="<short description>"
@@ -258,7 +301,6 @@ exports.handler = async (event) => {
     let summaryBlock = "";
     if (supabase) {
       try {
-        // Decisions
         const { data: decisionsData } = await supabase
           .from("decisions").select("*")
           .order("created_at", { ascending: false }).limit(50);
@@ -274,18 +316,15 @@ exports.handler = async (event) => {
           memoryBlock += "=== END DECISION LOG ===\n";
         }
 
-        // Latest summary
         const { data: summaryData } = await supabase
           .from("summaries").select("*")
           .order("created_at", { ascending: false }).limit(1);
         const latestSummary = summaryData?.[0];
         if (latestSummary?.summary_text) {
-          summaryBlock = `\n\n=== ROLLING CONVERSATION SUMMARY (everything before the recent messages below) ===\n${latestSummary.summary_text}\n=== END SUMMARY ===\n`;
+          summaryBlock = `\n\n=== ROLLING CONVERSATION SUMMARY ===\n${latestSummary.summary_text}\n=== END SUMMARY ===\n`;
           debug.has_summary = true;
         }
 
-        // Check if we should fold older messages into a new summary
-        // Count messages since the last summary
         const sinceTimestamp = latestSummary?.last_message_at || "1970-01-01";
         const { count: newMessagesCount } = await supabase
           .from("messages")
@@ -294,8 +333,6 @@ exports.handler = async (event) => {
         debug.messages_since_summary = newMessagesCount || 0;
 
         if ((newMessagesCount || 0) >= SUMMARY_THRESHOLD) {
-          // Fold the older messages into a new summary
-          // We summarise everything except the last 10 messages (which stay live in the recent window)
           const { data: messagesToFold } = await supabase
             .from("messages")
             .select("*")
@@ -322,7 +359,49 @@ exports.handler = async (event) => {
       }
     }
 
+    // Detect Drive file URLs in the latest user message and fetch them
+    let attachedFiles = [];
+    if (googleAuth && messages.length > 0) {
+      const latestMsg = messages[messages.length - 1];
+      const latestContent = typeof latestMsg.content === "string" ? latestMsg.content : "";
+      const fileIds = extractDriveFileIds(latestContent);
+      debug.detected_drive_urls = fileIds.length;
+      for (const fileId of fileIds.slice(0, 3)) {
+        const file = await fetchDriveFile(fileId);
+        if (file && !file.error) {
+          attachedFiles.push(file);
+        } else if (file?.error) {
+          debug.file_fetch_errors = debug.file_fetch_errors || [];
+          debug.file_fetch_errors.push({ fileId, error: file.error });
+        }
+      }
+      debug.files_attached = attachedFiles.length;
+    }
+
     const fullSystem = system + driveBlock + summaryBlock + memoryBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
+
+    // Build messages array, attaching files to the latest user message if any
+    const apiMessages = messages.map((m, i) => {
+      if (i === messages.length - 1 && attachedFiles.length > 0 && m.role === "user") {
+        const contentBlocks = [];
+        for (const file of attachedFiles) {
+          if (file.isPdf) {
+            contentBlocks.push({
+              type: "document",
+              source: { type: "base64", media_type: "application/pdf", data: file.base64 },
+            });
+          } else {
+            contentBlocks.push({
+              type: "image",
+              source: { type: "base64", media_type: file.mimeType, data: file.base64 },
+            });
+          }
+        }
+        contentBlocks.push({ type: "text", text: m.content });
+        return { role: m.role, content: contentBlocks };
+      }
+      return m;
+    });
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -335,7 +414,7 @@ exports.handler = async (event) => {
         model: "claude-sonnet-4-6",
         max_tokens: 1500,
         system: fullSystem,
-        messages,
+        messages: apiMessages,
       }),
     });
 
