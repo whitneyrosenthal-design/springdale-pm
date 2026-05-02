@@ -1,4 +1,5 @@
 const { createClient } = require("@supabase/supabase-js");
+const { google } = require("googleapis");
 
 let supabase = null;
 if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
@@ -7,6 +8,72 @@ if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
     process.env.SUPABASE_SERVICE_KEY
   );
 }
+
+// Set up Google auth from the env JSON
+let googleAuth = null;
+try {
+  if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    googleAuth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: [
+        "https://www.googleapis.com/auth/documents.readonly",
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+      ],
+    });
+  }
+} catch (e) {
+  console.error("Google auth setup error:", e.message);
+}
+
+// Cache doc/sheet content for 60 seconds to avoid hammering the API
+const cache = { masterDoc: null, budgetSheet: null, ts: 0 };
+
+const fetchMasterDoc = async () => {
+  if (!googleAuth || !process.env.MASTER_DOC_ID) return null;
+  try {
+    const docs = google.docs({ version: "v1", auth: googleAuth });
+    const res = await docs.documents.get({ documentId: process.env.MASTER_DOC_ID });
+    const text = (res.data.body?.content || [])
+      .map((el) => {
+        if (!el.paragraph) return "";
+        return (el.paragraph.elements || [])
+          .map((e) => e.textRun?.content || "")
+          .join("");
+      })
+      .join("");
+    return text.trim();
+  } catch (e) {
+    console.error("Master doc fetch error:", e.message);
+    return `[Error fetching master doc: ${e.message}]`;
+  }
+};
+
+const fetchBudgetSheet = async () => {
+  if (!googleAuth || !process.env.BUDGET_SHEET_ID) return null;
+  try {
+    const sheets = google.sheets({ version: "v4", auth: googleAuth });
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: process.env.BUDGET_SHEET_ID });
+    const tabs = meta.data.sheets || [];
+    const allTabs = [];
+    for (const tab of tabs) {
+      const tabName = tab.properties?.title || "Sheet";
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: process.env.BUDGET_SHEET_ID,
+        range: tabName,
+      });
+      const rows = res.data.values || [];
+      if (rows.length === 0) continue;
+      const formatted = rows.map((r) => r.join(" | ")).join("\n");
+      allTabs.push(`--- TAB: ${tabName} ---\n${formatted}`);
+    }
+    return allTabs.join("\n\n");
+  } catch (e) {
+    console.error("Budget sheet fetch error:", e.message);
+    return `[Error fetching budget sheet: ${e.message}]`;
+  }
+};
 
 const TAG_INSTRUCTION = `
 
@@ -21,11 +88,6 @@ Set signoff="true" if the decision is over £500, structural, or aesthetically h
 You may emit multiple tags (one per line) if multiple decisions occurred.
 Emit the tag for ANY clear decision, even tentative ones — Whitney and Charlie need a paper trail.
 
-EXAMPLES of when to emit:
-- "Let's go with sheep's wool insulation, £800" → emit a tag
-- "I've booked J. Murphy as the surveyor for £450" → emit a tag
-- "Confirmed we want the open-plan layout" → emit a tag
-
 DO NOT emit tags for general advice, suggestions you're proposing, or questions.
 === END DECISION LOGGING ===
 `;
@@ -35,33 +97,54 @@ exports.handler = async (event) => {
     return { statusCode: 405, body: "Method not allowed" };
   }
 
-  const debug = { supabase_configured: !!supabase };
+  const debug = {
+    supabase_configured: !!supabase,
+    google_configured: !!googleAuth,
+  };
 
   try {
     const { messages, system } = JSON.parse(event.body);
 
-    let memoryBlock = "";
+    // Fetch live Drive content (with simple 60s cache)
+    let driveBlock = "";
+    const now = Date.now();
+    if (googleAuth && (now - cache.ts > 60000 || !cache.masterDoc)) {
+      const [docContent, sheetContent] = await Promise.all([
+        fetchMasterDoc(),
+        fetchBudgetSheet(),
+      ]);
+      cache.masterDoc = docContent;
+      cache.budgetSheet = sheetContent;
+      cache.ts = now;
+      debug.drive_refreshed = true;
+    } else {
+      debug.drive_cached = true;
+    }
 
+    if (cache.masterDoc) {
+      driveBlock += `\n\n=== LIVE MASTER DOCUMENT (Google Doc, latest version) ===\n${cache.masterDoc}\n=== END MASTER DOCUMENT ===\n`;
+      debug.master_doc_chars = cache.masterDoc.length;
+    }
+    if (cache.budgetSheet) {
+      driveBlock += `\n\n=== LIVE BUDGET SHEET (Google Sheet, latest version) ===\n${cache.budgetSheet}\n=== END BUDGET SHEET ===\n`;
+      debug.budget_sheet_chars = cache.budgetSheet.length;
+    }
+
+    // Fetch Supabase memory
+    let memoryBlock = "";
     if (supabase) {
       try {
-        const { data: stateData, error: stateErr } = await supabase
+        const { data: stateData } = await supabase
           .from("project_state").select("*").eq("id", 1).single();
-        const { data: decisionsData, error: decErr } = await supabase
+        const { data: decisionsData } = await supabase
           .from("decisions").select("*")
           .order("created_at", { ascending: false }).limit(50);
 
-        debug.state_error = stateErr?.message || null;
-        debug.decisions_error = decErr?.message || null;
         debug.decisions_count = decisionsData?.length || 0;
 
-        memoryBlock = "\n\n=== PROJECT MEMORY (always current) ===\n";
-        if (stateData) {
-          memoryBlock += `\nPROJECT STATE: ${stateData.summary || "(not yet set)"}\n`;
-          if (stateData.budget_spent) memoryBlock += `Budget spent: £${stateData.budget_spent}\n`;
-          if (stateData.active_quotes) memoryBlock += `Active quotes:\n${stateData.active_quotes}\n`;
-          if (stateData.open_questions) memoryBlock += `Open questions:\n${stateData.open_questions}\n`;
-          if (stateData.completed_tasks) memoryBlock += `Completed tasks:\n${stateData.completed_tasks}\n`;
-          if (stateData.contractor_list) memoryBlock += `Contractors:\n${stateData.contractor_list}\n`;
+        memoryBlock = "\n\n=== PROJECT MEMORY (decisions logged so far) ===\n";
+        if (stateData?.summary) {
+          memoryBlock += `\nSTATE: ${stateData.summary}\n`;
         }
         if (decisionsData && decisionsData.length > 0) {
           memoryBlock += `\nDECISION LOG (${decisionsData.length} entries, most recent first):\n`;
@@ -78,7 +161,7 @@ exports.handler = async (event) => {
       }
     }
 
-    const fullSystem = system + memoryBlock + TAG_INSTRUCTION;
+    const fullSystem = system + driveBlock + memoryBlock + TAG_INSTRUCTION;
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
