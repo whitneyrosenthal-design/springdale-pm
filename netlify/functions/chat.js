@@ -73,7 +73,6 @@ const fetchBudgetSheet = async () => {
   }
 };
 
-// Extract Google Drive file IDs from a string
 const extractDriveFileIds = (text) => {
   const patterns = [
     /drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/g,
@@ -90,7 +89,6 @@ const extractDriveFileIds = (text) => {
   return Array.from(ids);
 };
 
-// Fetch a Drive file's bytes + metadata
 const fetchDriveFile = async (fileId) => {
   if (!googleAuth) return null;
   try {
@@ -101,19 +99,16 @@ const fetchDriveFile = async (fileId) => {
     });
     const { name, mimeType, size } = meta.data;
 
-    // Skip if we can't handle this type
     const supportedImage = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mimeType);
     const isPdf = mimeType === "application/pdf";
     if (!supportedImage && !isPdf) {
       return { name, mimeType, error: `Unsupported type: ${mimeType}` };
     }
 
-    // Skip large files
     if (size && parseInt(size) > 10 * 1024 * 1024) {
       return { name, mimeType, error: `File too large (${Math.round(size / 1024 / 1024)}MB, limit 10MB)` };
     }
 
-    // Get file bytes
     const fileRes = await drive.files.get(
       { fileId, alt: "media" },
       { responseType: "arraybuffer" }
@@ -183,7 +178,7 @@ const appendLineItemToSheet = async ({ category, room, item, vendor, status, est
 };
 
 const generateSummary = async (existingSummary, messagesToFold) => {
-  const summaryPrompt = `You are summarising a renovation project chat conversation between Whitney, Charlie, and RENO. Produce a concise rolling summary (under 400 words, bullet points) capturing key topics, decisions, open questions, contractors mentioned, and any tensions. Do NOT repeat the decision log — focus on context and unresolved items.
+  const summaryPrompt = `You are summarising a renovation project chat between Whitney, Charlie, and RENO. Produce a concise rolling summary (under 400 words, bullet points) capturing key topics, decisions, open questions, contractors mentioned, and any tensions. Do NOT repeat the decision log — focus on context and unresolved items.
 
 ${existingSummary ? `\nEXISTING SUMMARY (extend with the new messages below):\n${existingSummary}\n` : ""}
 
@@ -251,20 +246,26 @@ DO NOT emit tags for general advice, suggestions, or questions.
 === END DECISION & COST LOGGING ===
 `;
 
-exports.handler = async (event) => {
-  if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: "Method not allowed" };
+module.exports = async (req, res) => {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  if (event.queryStringParameters?.action === "write_decision") {
-    const body = JSON.parse(event.body);
-    const result = await appendDecisionToDoc(body.decision, body.logged_by, body.cost_impact, body.needs_signoff);
-    return { statusCode: 200, body: JSON.stringify(result) };
+  const action = req.query?.action;
+
+  // Routed sub-actions for Drive writes
+  if (action === "write_decision") {
+    const result = await appendDecisionToDoc(
+      req.body.decision,
+      req.body.logged_by,
+      req.body.cost_impact,
+      req.body.needs_signoff
+    );
+    return res.status(200).json(result);
   }
-  if (event.queryStringParameters?.action === "write_line_item") {
-    const body = JSON.parse(event.body);
-    const result = await appendLineItemToSheet(body);
-    return { statusCode: 200, body: JSON.stringify(result) };
+  if (action === "write_line_item") {
+    const result = await appendLineItemToSheet(req.body);
+    return res.status(200).json(result);
   }
 
   const debug = {
@@ -273,9 +274,8 @@ exports.handler = async (event) => {
   };
 
   try {
-    const { messages, system } = JSON.parse(event.body);
+    const { messages, system } = req.body;
 
-    // Drive content
     let driveBlock = "";
     const now = Date.now();
     if (googleAuth && (now - cache.ts > 60000 || !cache.masterDoc)) {
@@ -296,7 +296,6 @@ exports.handler = async (event) => {
       debug.budget_sheet_chars = cache.budgetSheet.length;
     }
 
-    // Memory blocks
     let memoryBlock = "";
     let summaryBlock = "";
     if (supabase) {
@@ -359,7 +358,6 @@ exports.handler = async (event) => {
       }
     }
 
-    // Detect Drive file URLs in the latest user message and fetch them
     let attachedFiles = [];
     if (googleAuth && messages.length > 0) {
       const latestMsg = messages[messages.length - 1];
@@ -380,7 +378,6 @@ exports.handler = async (event) => {
 
     const fullSystem = system + driveBlock + summaryBlock + memoryBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
 
-    // Build messages array, attaching files to the latest user message if any
     const apiMessages = messages.map((m, i) => {
       if (i === messages.length - 1 && attachedFiles.length > 0 && m.role === "user") {
         const contentBlocks = [];
@@ -421,16 +418,8 @@ exports.handler = async (event) => {
     const data = await response.json();
     data._debug = debug;
 
-    return {
-      statusCode: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    };
+    return res.status(200).json(data);
   } catch (err) {
-    return {
-      statusCode: 500,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: err.message, debug }),
-    };
+    return res.status(500).json({ error: err.message, debug });
   }
 };
