@@ -75,6 +75,25 @@ const fetchBudgetSheet = async () => {
   }
 };
 
+const LIVE_DATA_INSTRUCTION = `
+
+=== LIVE DATA ACCESS (IMPORTANT) ===
+You have LIVE READ ACCESS to two Google files via this tool:
+1. The master project document (injected above as "LIVE MASTER DOCUMENT")
+2. The budget spreadsheet (injected above as "LIVE BUDGET SHEET")
+
+Both documents are refreshed every ~60 seconds from Google Drive. When users ask about the master doc or budget sheet, READ THE INJECTED CONTENT ABOVE and reference it directly. You can quote from it, summarise sections, and answer specific questions about its contents.
+
+DO NOT claim you cannot access these documents — you can. The content is right there in your context, between the "===" markers.
+
+If a document section is missing or empty, say so honestly (e.g. "the budget sheet appears to be empty"). But do not say you have no integration when content is clearly present.
+=== END LIVE DATA ACCESS ===
+`;
+
+const TAG_INSTRUCTION = `
+
+=== DECISION LOGGING (CRITICAL) ===
+
 const TAG_INSTRUCTION = `
 
 === DECISION LOGGING (CRITICAL) ===
@@ -161,7 +180,7 @@ exports.handler = async (event) => {
       }
     }
 
-    const fullSystem = system + driveBlock + memoryBlock + TAG_INSTRUCTION;
+    const fullSystem = system + driveBlock + memoryBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
