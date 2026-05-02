@@ -9,7 +9,6 @@ if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY) {
   );
 }
 
-// Set up Google auth from the env JSON
 let googleAuth = null;
 try {
   if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
@@ -27,7 +26,6 @@ try {
   console.error("Google auth setup error:", e.message);
 }
 
-// Cache doc/sheet content for 60 seconds to avoid hammering the API
 const cache = { masterDoc: null, budgetSheet: null, ts: 0 };
 
 const fetchMasterDoc = async () => {
@@ -93,10 +91,6 @@ If a document section is missing or empty, say so honestly (e.g. "the budget she
 const TAG_INSTRUCTION = `
 
 === DECISION LOGGING (CRITICAL) ===
-
-const TAG_INSTRUCTION = `
-
-=== DECISION LOGGING (CRITICAL) ===
 You MUST detect when decisions, commitments, contractor choices, quotes, or material/spec selections are made in the conversation. When you detect one, you MUST append a structured tag to the END of your response on its own line.
 
 EXACT FORMAT (copy precisely):
@@ -124,7 +118,6 @@ exports.handler = async (event) => {
   try {
     const { messages, system } = JSON.parse(event.body);
 
-    // Fetch live Drive content (with simple 60s cache)
     let driveBlock = "";
     const now = Date.now();
     if (googleAuth && (now - cache.ts > 60000 || !cache.masterDoc)) {
@@ -149,7 +142,6 @@ exports.handler = async (event) => {
       debug.budget_sheet_chars = cache.budgetSheet.length;
     }
 
-    // Fetch Supabase memory
     let memoryBlock = "";
     if (supabase) {
       try {
