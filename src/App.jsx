@@ -170,7 +170,7 @@ export default function App() {
 
   // Parses [LOG_DECISION] tags from RENO's responses, returns clean text + decisions array
   const extractDecisions = (text) => {
-    const tagRegex = /\[LOG_DECISION\]\s+category="([^"]*)"\s+cost="([^"]*)"\s+signoff="([^"]*)"\s+decision="([^"]*)"/g;
+    const tagRegex = /\[LOG_DECISION\][^\[]*?category="([^"]*)"[^\[]*?cost="([^"]*)"[^\[]*?signoff="([^"]*)"[^\[]*?decision="((?:[^"\\]|\\.)*)"/g;
     const found = [];
     let match;
     while ((match = tagRegex.exec(text)) !== null) {
