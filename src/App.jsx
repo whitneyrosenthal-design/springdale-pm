@@ -142,6 +142,29 @@ export default function App() {
     }
   };
 
+const fetchBriefing = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(ANTHROPIC_API + "?action=brief", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user }),
+      });
+      const data = await res.json();
+      const briefingText = data.briefing || "Could not generate briefing.";
+      const briefingMsg = {
+        role: "assistant",
+        content: briefingText,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, briefingMsg]);
+      await saveMessage("assistant", briefingText, "RENO");
+    } catch (e) {
+      console.error("Briefing error:", e);
+    }
+    setLoading(false);
+  };
+  
   const saveDecision = async ({ category, decision, cost_impact, needs_signoff, source, logged_by }) => {
     try {
       const { data, error } = await supabase.from("decisions").insert({
@@ -514,8 +537,28 @@ export default function App() {
             <div style={{ fontSize: "30px", marginBottom: "14px" }}>🏛</div>
             <p style={{ color: "#5a5248", fontFamily: "'Playfair Display', serif", fontSize: "16px", marginBottom: "6px" }}>Morning, {user}.</p>
             <p style={{ color: "#3a3530", fontSize: "13px", maxWidth: "320px", margin: "0 auto 18px", lineHeight: 1.65 }}>
-              I have full context on the Springdale Road project. Attach photos or PDFs with the 📎 button, or just type.
+              I have full context on the Springdale Road project. Attach files with 📎, just type, or get a quick briefing on where things stand:
             </p>
+            <button
+              onClick={fetchBriefing}
+              disabled={loading}
+              className="quick-btn"
+              style={{
+                background: "#c4a88218",
+                border: "1px solid #c4a88266",
+                borderRadius: "20px",
+                padding: "10px 22px",
+                color: "#c4a882",
+                fontSize: "13px",
+                fontWeight: 600,
+                cursor: loading ? "not-allowed" : "pointer",
+                fontFamily: "'Lato', sans-serif",
+                transition: "all 0.15s",
+                opacity: loading ? 0.5 : 1,
+              }}
+            >
+              📊 Brief me on where we are
+            </button>
           </div>
         )}
 
