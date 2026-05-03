@@ -194,19 +194,32 @@ ${foldThese.map((m) => `[${m.user_name}]: ${m.content}`).join("\n\n")}
 
 Write the updated summary now.`;
 
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 800,
-          messages: [{ role: "user", content: summaryPrompt }],
-        }),
-      });
+      // Split system prompt into stable (cacheable) and dynamic parts
+    // The static project context goes in the cacheable block; everything live stays uncached
+    const stableSystem = system + driveBlock + memoryBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
+    const dynamicSystem = summaryBlock; // summary changes whenever a regen happens
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1500,
+        system: [
+          {
+            type: "text",
+            text: stableSystem,
+            cache_control: { type: "ephemeral" },
+          },
+          ...(dynamicSystem ? [{ type: "text", text: dynamicSystem }] : []),
+        ],
+        messages: apiMessages,
+      }),
+    });
       const data = await response.json();
       const newSummaryText = data.content?.[0]?.text;
       if (newSummaryText) {
