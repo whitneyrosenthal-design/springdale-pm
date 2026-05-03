@@ -221,24 +221,60 @@ DO NOT claim you cannot access these documents — you can. The content is right
 
 const TAG_INSTRUCTION = `
 
-=== DECISION & COST LOGGING (CRITICAL) ===
-You MUST detect when decisions, commitments, contractor choices, quotes, or material/spec selections are made. Append structured tags to the END of your response, each on its own line.
+=== DECISION LOGGING — CONFIRMATION-DRIVEN ===
 
-TAG 1 — DECISION TAG:
+CRITICAL BEHAVIOUR CHANGE: Do NOT silently log decisions. Always ASK the user first.
+
+When you detect that a user has expressed something that might be a decision, a quote, a contractor choice, a spec preference, or a commitment — DO NOT emit a logging tag immediately. Instead, ASK them which type of log they want:
+
+EXAMPLE — Whitney says: "I think we should go with the wooden interior doors instead of crittall — saves us about £2k"
+You should respond with the answer to her question/comment AS NORMAL, then add at the end:
+"📋 **Should I log this?** Options:
+- Add as a **final decision** (already settled)
+- Add as a **pending decision** (needs the other person's sign-off)
+- Just note it (don't add to any log)"
+
+When the user replies with their choice (e.g. "yes pending", "log as final", "yes pending, deadline next Friday"):
+- For "final decision" → emit [LOG_DECISION] tag (existing behaviour)
+- For "pending decision" → emit [LOG_PENDING] tag (new — see below)
+- For "just note" → emit no tag
+
+WHEN TO PROACTIVELY ASK:
+- Specific costs/quotes mentioned (£X for Y)
+- Contractor or vendor names mentioned as choices ("going with X")
+- Material/spec preferences ("we want X over Y")
+- Statements like "decided", "confirmed", "going with", "let's do"
+- ESPECIALLY when only ONE user is in the conversation but the decision affects both
+
+WHEN NOT TO ASK:
+- Obvious facts or questions (no decision being made)
+- Casual discussion or research updates
+- Things the user is just thinking out loud about
+
+NEW TAG — PENDING DECISION:
+[LOG_PENDING] proposed_by="<Whitney|Charlie>" category="<category>" cost="<number or empty>" reasoning="<why>" deadline="<YYYY-MM-DD or empty>" decision="<short description>"
+
+EXISTING TAG — FINAL DECISION (only when explicitly confirmed):
 [LOG_DECISION] category="<category>" cost="<number or empty>" signoff="<true or false>" decision="<short description>"
 
+EXISTING TAG — LINE ITEM (only when committing to a budget cost):
+[LOG_LINE_ITEM] category="<budget category>" room="<room>" item="<description>" vendor="<vendor>" status="<status>" estimate="<number>" quote="<number>" actual="<number>" decided_by="<Whitney|Charlie|Joint>" notes="<notes>"
+
 Categories: structural | finishes | budget | contractor | timeline | sustainability | quote | other
-Set signoff="true" if over £500, structural, or aesthetically hard to reverse.
-
-TAG 2 — LINE ITEM TAG (only when a specific cost is being committed):
-[LOG_LINE_ITEM] category="<one of the 7 budget categories>" room="<room>" item="<item description>" vendor="<vendor or empty>" status="<status>" estimate="<number or empty>" quote="<number or empty>" actual="<number or empty>" decided_by="<Whitney|Charlie|Joint|RENO suggested>" notes="<optional notes>"
-
-Budget categories: Structural / Kitchen / Doors | Garden Office | Basement / Bathroom / UFH | Joinery / Storage / Finishes | Tech / Electrical / V-Rads | Contingency | Rent overrun buffer
+Budget categories (for line items): Structural / Kitchen / Doors | Garden Office | Basement / Bathroom / UFH | Joinery / Storage / Finishes | Tech / Electrical / V-Rads | Contingency | Rent overrun buffer
 Rooms: Ground Floor (Open Plan) | Kitchen | Basement | Bathroom | Bedroom 1 | Bedroom 2 | Bedroom 3 | Garden Office | Hallway / Storage | Whole property | External / Garden | Other
 Status: Estimating | Awaiting quote | Quoted | Approved | In progress | Paid | Cancelled
 
+DEADLINE SUGGESTIONS for pending decisions:
+- If user doesn't specify, suggest one based on context: "I'd suggest a deadline of [date] given [reason]. Sound right?"
+- Project timeline pressures: ownership June 26, target completion mid-September, school starts Sept 7
+- Use ISO format YYYY-MM-DD when emitting the tag
+
+PENDING DECISIONS REFERENCE:
+You have access to the live PENDING DECISIONS list in your context. When the user asks about pending items or asks "what needs to be decided?", reference that list directly. Surface items where the current user hasn't responded yet, and overdue items.
+
 DO NOT emit tags for general advice, suggestions, or questions.
-=== END DECISION & COST LOGGING ===
+=== END DECISION LOGGING ===
 `;
 
 module.exports = async (req, res) => {
@@ -277,6 +313,91 @@ module.exports = async (req, res) => {
         fields: "id, name, webViewLink",
       });
       return res.status(200).json({ ok: true, file: result.data });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  if (action === "create_pending") {
+    if (!supabase) return res.status(500).json({ error: "Supabase not configured" });
+    try {
+      const { proposed_by, category, decision, cost_impact, reasoning, deadline } = req.body;
+      // The proposer auto-approves their own proposal
+      const initialState = proposed_by === "Whitney"
+        ? { whitney_status: "approved", whitney_responded_at: new Date().toISOString() }
+        : { charlie_status: "approved", charlie_responded_at: new Date().toISOString() };
+      const { data, error } = await supabase.from("pending_decisions").insert({
+        proposed_by,
+        category: category || "other",
+        decision,
+        cost_impact: cost_impact || null,
+        reasoning: reasoning || null,
+        deadline: deadline || null,
+        ...initialState,
+      }).select();
+      if (error) return res.status(500).json({ error: error.message });
+      return res.status(200).json({ ok: true, pending: data?.[0] });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  if (action === "respond_to_pending") {
+    if (!supabase) return res.status(500).json({ error: "Supabase not configured" });
+    try {
+      const { id, user, status, note } = req.body;
+      // status is "approved" or "rejected"
+      const updates = {
+        [`${user.toLowerCase()}_status`]: status,
+        [`${user.toLowerCase()}_responded_at`]: new Date().toISOString(),
+        [`${user.toLowerCase()}_note`]: note || null,
+      };
+      // Update the row
+      const { data: updated, error } = await supabase
+        .from("pending_decisions").update(updates)
+        .eq("id", id).select();
+      if (error) return res.status(500).json({ error: error.message });
+      const item = updated?.[0];
+      if (!item) return res.status(404).json({ error: "Not found" });
+
+      // Check if both approved → move to final decisions log
+      if (item.whitney_status === "approved" && item.charlie_status === "approved") {
+        await supabase.from("pending_decisions").update({ final_status: "both_approved" }).eq("id", id);
+        // Insert into final decisions log
+        await supabase.from("decisions").insert({
+          category: item.category,
+          decision: item.decision + " (jointly approved)",
+          cost_impact: item.cost_impact,
+          needs_signoff: false,
+          source: "pending_approved",
+          logged_by: "Whitney + Charlie",
+        });
+        // Append to master doc as well
+        if (googleAuth && process.env.MASTER_DOC_ID) {
+          await appendDecisionToDoc(
+            item.decision + " (jointly approved)",
+            "Whitney + Charlie",
+            item.cost_impact,
+            false
+          );
+        }
+        return res.status(200).json({ ok: true, finalized: true, item });
+      }
+      return res.status(200).json({ ok: true, finalized: false, item });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  if (action === "list_pending") {
+    if (!supabase) return res.status(500).json({ error: "Supabase not configured" });
+    try {
+      const { data, error } = await supabase
+        .from("pending_decisions").select("*")
+        .neq("final_status", "both_approved")
+        .order("created_at", { ascending: false });
+      if (error) return res.status(500).json({ error: error.message });
+      return res.status(200).json({ pending: data || [] });
     } catch (e) {
       return res.status(500).json({ error: e.message });
     }
@@ -426,6 +547,24 @@ Generate the briefing now for ${targetUser}.`;
       });
       memoryBlock += "=== END DECISION LOG ===\n";
     }
+
+    // Also fetch pending decisions for context
+        const { data: pendingData } = await supabase
+          .from("pending_decisions").select("*")
+          .neq("final_status", "both_approved")
+          .order("created_at", { ascending: false }).limit(20);
+        debug.pending_count = pendingData?.length || 0;
+        if (pendingData && pendingData.length > 0) {
+          memoryBlock += "\n\n=== PENDING DECISIONS (awaiting joint sign-off) ===\n";
+          pendingData.forEach((p) => {
+            const date = new Date(p.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+            const cost = p.cost_impact ? ` [£${p.cost_impact}]` : "";
+            const deadline = p.deadline ? ` [due ${p.deadline}]` : "";
+            const status = `Whitney: ${p.whitney_status}, Charlie: ${p.charlie_status}`;
+            memoryBlock += `- ${date} (proposed by ${p.proposed_by})${cost}${deadline}: ${p.decision} — ${status}\n`;
+          });
+          memoryBlock += "=== END PENDING DECISIONS ===\n";
+        }
 
     const latestSummary = summaryRes.data?.[0];
     if (latestSummary?.summary_text) {
