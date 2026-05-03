@@ -515,6 +515,9 @@ const fetchBriefing = async () => {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <button className="panel-btn" onClick={fetchBriefing} disabled={loading} style={{ background: "none", border: "1px solid #2a2622", borderRadius: "20px", padding: "5px 11px", color: "#7a6e62", fontSize: "11px", letterSpacing: "0.08em", cursor: loading ? "not-allowed" : "pointer", fontFamily: "'Lato', sans-serif", transition: "color 0.15s", opacity: loading ? 0.5 : 1 }}>
+            📊 BRIEF
+          </button>
           <button className="panel-btn" onClick={() => { setShowDecisions(true); loadDecisions(); }} style={{ background: "none", border: "1px solid #2a2622", borderRadius: "20px", padding: "5px 11px", color: "#7a6e62", fontSize: "11px", letterSpacing: "0.08em", cursor: "pointer", fontFamily: "'Lato', sans-serif", transition: "color 0.15s" }}>
             📋 LOG ({decisions.length})
           </button>
