@@ -194,10 +194,10 @@ ${foldThese.map((m) => `[${m.user_name}]: ${m.content}`).join("\n\n")}
 
 Write the updated summary now.`;
 
-      // Split system prompt into stable (cacheable) and dynamic parts
-    // The static project context goes in the cacheable block; everything live stays uncached
-    const stableSystem = system + driveBlock + memoryBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
-    const dynamicSystem = summaryBlock; // summary changes whenever a regen happens
+     // Build a TRULY stable system prefix (only changes when master doc/budget sheet/project context change)
+    // Decisions and summary stay OUTSIDE the cache because they update every message
+    const stableSystem = system + driveBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
+    const dynamicSystem = memoryBlock + summaryBlock;
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
