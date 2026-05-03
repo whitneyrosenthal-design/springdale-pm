@@ -83,6 +83,9 @@ export default function App() {
   const [decisions, setDecisions] = useState([]);
   const [pendingFiles, setPendingFiles] = useState([]); // [{name, mimeType, base64, size}]
   const [pendingDriveSave, setPendingDriveSave] = useState(null); // {messageId, files}
+  const [pendingDecisions, setPendingDecisions] = useState([]);
+  const [showPending, setShowPending] = useState(false);
+  const [respondingToPending, setRespondingToPending] = useState(null); // {id, action}
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -95,6 +98,7 @@ export default function App() {
     if (user) {
       loadHistory();
       loadDecisions();
+      loadPendingDecisions();
       inputRef.current?.focus();
     }
   }, [user]);
@@ -132,6 +136,48 @@ export default function App() {
     } catch (e) {
       console.error("Decisions load error:", e);
     }
+  };
+
+  const loadPendingDecisions = async () => {
+    try {
+      const res = await fetch(ANTHROPIC_API + "?action=list_pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.pending) setPendingDecisions(data.pending);
+    } catch (e) {
+      console.error("Pending load error:", e);
+    }
+  };
+
+  const respondToPending = async (id, status, note) => {
+    setRespondingToPending({ id, action: status });
+    try {
+      const res = await fetch(ANTHROPIC_API + "?action=respond_to_pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, user, status, note }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        await loadPendingDecisions();
+        await loadDecisions();
+        if (data.finalized) {
+          const confirmMsg = {
+            role: "assistant",
+            content: `✅ Both approved — decision logged: "${data.item.decision}"`,
+            timestamp: new Date(),
+          };
+          setMessages((prev) => [...prev, confirmMsg]);
+          await saveMessage("assistant", confirmMsg.content, "RENO");
+        }
+      }
+    } catch (e) {
+      console.error("Respond error:", e);
+    }
+    setRespondingToPending(null);
   };
 
   const saveMessage = async (role, content, userName) => {
@@ -186,8 +232,10 @@ const fetchBriefing = async () => {
   const extractDecisions = (text) => {
     const decisionRegex = /\[LOG_DECISION\][^\[]*?category="([^"]*)"[^\[]*?cost="([^"]*)"[^\[]*?signoff="([^"]*)"[^\[]*?decision="((?:[^"\\]|\\.)*)"/g;
     const lineItemRegex = /\[LOG_LINE_ITEM\][^\[]*?category="([^"]*)"[^\[]*?room="([^"]*)"[^\[]*?item="((?:[^"\\]|\\.)*)"[^\[]*?vendor="((?:[^"\\]|\\.)*)"[^\[]*?status="([^"]*)"[^\[]*?estimate="([^"]*)"[^\[]*?quote="([^"]*)"[^\[]*?actual="([^"]*)"[^\[]*?decided_by="([^"]*)"[^\[]*?notes="((?:[^"\\]|\\.)*)"/g;
+    const pendingRegex = /\[LOG_PENDING\][^\[]*?proposed_by="([^"]*)"[^\[]*?category="([^"]*)"[^\[]*?cost="([^"]*)"[^\[]*?reasoning="((?:[^"\\]|\\.)*)"[^\[]*?deadline="([^"]*)"[^\[]*?decision="((?:[^"\\]|\\.)*)"/g;
     const decisions = [];
     const lineItems = [];
+    const pendings = [];
     let match;
     while ((match = decisionRegex.exec(text)) !== null) {
       decisions.push({
@@ -205,8 +253,22 @@ const fetchBriefing = async () => {
         decided_by: match[9], notes: match[10],
       });
     }
-    const cleanText = text.replace(decisionRegex, "").replace(lineItemRegex, "").trim();
-    return { cleanText, decisions, lineItems };
+    while ((match = pendingRegex.exec(text)) !== null) {
+      pendings.push({
+        proposed_by: match[1],
+        category: match[2],
+        cost_impact: match[3] ? parseFloat(match[3]) : null,
+        reasoning: match[4],
+        deadline: match[5] || null,
+        decision: match[6],
+      });
+    }
+    const cleanText = text
+      .replace(decisionRegex, "")
+      .replace(lineItemRegex, "")
+      .replace(pendingRegex, "")
+      .trim();
+    return { cleanText, decisions, lineItems, pendings };
   };
 
   const buildApiMessages = (history, newMsg, currentUser) => {
@@ -375,7 +437,7 @@ const fetchBriefing = async () => {
       });
       const data = await response.json();
       const rawReply = data.content?.[0]?.text || "Sorry, I couldn't generate a response.";
-      const { cleanText, decisions: autoDecisions, lineItems: autoLineItems } = extractDecisions(rawReply);
+      const { cleanText, decisions: autoDecisions, lineItems: autoLineItems, pendings: autoPendings } = extractDecisions(rawReply);
 
       for (const d of autoDecisions) {
         await saveDecision({ ...d, logged_by: user });
@@ -395,6 +457,21 @@ const fetchBriefing = async () => {
           body: JSON.stringify(li),
         }).catch(() => {});
       }
+      for (const p of autoPendings) {
+        await fetch(ANTHROPIC_API + "?action=create_pending", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            proposed_by: p.proposed_by || user,
+            category: p.category,
+            decision: p.decision,
+            cost_impact: p.cost_impact,
+            reasoning: p.reasoning,
+            deadline: p.deadline,
+          }),
+        }).catch(() => {});
+      }
+      if (autoPendings.length > 0) loadPendingDecisions();
 
       const assistantMsg = { role: "assistant", content: cleanText, timestamp: new Date() };
       setMessages((prev) => [...prev, assistantMsg]);
@@ -517,6 +594,9 @@ const fetchBriefing = async () => {
         <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
           <button className="panel-btn" onClick={fetchBriefing} disabled={loading} style={{ background: "none", border: "1px solid #2a2622", borderRadius: "20px", padding: "5px 11px", color: "#7a6e62", fontSize: "11px", letterSpacing: "0.08em", cursor: loading ? "not-allowed" : "pointer", fontFamily: "'Lato', sans-serif", transition: "color 0.15s", opacity: loading ? 0.5 : 1 }}>
             📊 BRIEF
+          </button>
+          <button className="panel-btn" onClick={() => { setShowPending(true); loadPendingDecisions(); }} style={{ background: pendingDecisions.length > 0 ? "#c4a88218" : "none", border: `1px solid ${pendingDecisions.length > 0 ? "#c4a88266" : "#2a2622"}`, borderRadius: "20px", padding: "5px 11px", color: pendingDecisions.length > 0 ? "#c4a882" : "#7a6e62", fontSize: "11px", letterSpacing: "0.08em", cursor: "pointer", fontFamily: "'Lato', sans-serif", transition: "color 0.15s" }}>
+            ⏳ PENDING ({pendingDecisions.length})
           </button>
           <button className="panel-btn" onClick={() => { setShowDecisions(true); loadDecisions(); }} style={{ background: "none", border: "1px solid #2a2622", borderRadius: "20px", padding: "5px 11px", color: "#7a6e62", fontSize: "11px", letterSpacing: "0.08em", cursor: "pointer", fontFamily: "'Lato', sans-serif", transition: "color 0.15s" }}>
             📋 LOG ({decisions.length})
@@ -667,6 +747,98 @@ const fetchBriefing = async () => {
         </div>
       </div>
 
+      {showPending && (
+        <div onClick={() => setShowPending(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", justifyContent: "flex-end" }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "min(480px, 100%)", height: "100%", background: "#1d1a17", borderLeft: "1px solid #2a2622", display: "flex", flexDirection: "column", animation: "fadeUp 0.2s ease" }}>
+            <div style={{ padding: "16px 20px", borderBottom: "1px solid #2a2622", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontFamily: "'Playfair Display', serif", fontSize: "16px", color: "#f0e6d3", fontWeight: 600 }}>Pending Decisions</div>
+                <div style={{ fontSize: "10px", color: "#5a5248", letterSpacing: "0.1em", marginTop: "2px" }}>{pendingDecisions.length} AWAITING SIGN-OFF</div>
+              </div>
+              <button onClick={() => setShowPending(false)} style={{ background: "none", border: "none", color: "#7a6e62", fontSize: "20px", cursor: "pointer", padding: "0 6px" }}>×</button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
+              {pendingDecisions.length === 0 && (
+                <div style={{ textAlign: "center", padding: "40px 20px", color: "#4a4440", fontSize: "12px", lineHeight: 1.6 }}>
+                  No pending decisions.<br /><br />When something needs joint sign-off, RENO will ask whether to log it as pending.
+                </div>
+              )}
+              {pendingDecisions.map((p) => {
+                const myStatusKey = user.toLowerCase() + "_status";
+                const otherUser = user === "Whitney" ? "Charlie" : "Whitney";
+                const otherStatusKey = otherUser.toLowerCase() + "_status";
+                const myStatus = p[myStatusKey];
+                const otherStatus = p[otherStatusKey];
+                const myNote = p[user.toLowerCase() + "_note"];
+                const otherNote = p[otherUser.toLowerCase() + "_note"];
+                const isOverdue = p.deadline && new Date(p.deadline) < new Date();
+                const isWaitingOnMe = myStatus === "pending";
+                return (
+                  <div key={p.id} style={{ background: "#201e1a", border: `1px solid ${isWaitingOnMe ? "#c4a88266" : "#2a2622"}`, borderRadius: "8px", padding: "12px 14px", marginBottom: "10px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "8px", marginBottom: "8px" }}>
+                      <span style={{ fontSize: "10px", color: "#c4a882", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>{p.category || "other"}</span>
+                      <div style={{ fontSize: "10px", color: "#4a4440", textAlign: "right" }}>
+                        <div>proposed {new Date(p.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}</div>
+                        {p.deadline && (
+                          <div style={{ color: isOverdue ? "#d49a82" : "#5a5248", marginTop: "2px" }}>
+                            {isOverdue ? "⚠️ overdue" : "due"} {new Date(p.deadline).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: "13px", color: "#ccc3b5", lineHeight: 1.5, marginBottom: "8px", fontWeight: 500 }}>{p.decision}</div>
+                    {p.cost_impact && <div style={{ fontSize: "11px", color: "#c4a882", marginBottom: "6px" }}>💰 £{p.cost_impact}</div>}
+                    {p.reasoning && <div style={{ fontSize: "11px", color: "#7a6e62", marginBottom: "8px", lineHeight: 1.5, fontStyle: "italic" }}>{p.reasoning}</div>}
+
+                    <div style={{ display: "flex", gap: "10px", fontSize: "10px", color: "#5a5248", marginBottom: "10px", paddingTop: "8px", borderTop: "1px solid #252118" }}>
+                      <div>
+                        <div style={{ color: USERS[p.proposed_by]?.color, fontWeight: 700, marginBottom: "2px" }}>Proposed by {p.proposed_by}</div>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ color: USERS.Whitney.color }}>Whitney: {p.whitney_status === "approved" ? "✅" : p.whitney_status === "rejected" ? "❌" : "⏳"} {p.whitney_status}</div>
+                        <div style={{ color: USERS.Charlie.color }}>Charlie: {p.charlie_status === "approved" ? "✅" : p.charlie_status === "rejected" ? "❌" : "⏳"} {p.charlie_status}</div>
+                      </div>
+                    </div>
+
+                    {(myNote || otherNote) && (
+                      <div style={{ fontSize: "10px", color: "#5a5248", marginBottom: "8px", paddingTop: "6px", borderTop: "1px solid #252118" }}>
+                        {myNote && <div style={{ marginBottom: "2px" }}>{user}: "{myNote}"</div>}
+                        {otherNote && <div>{otherUser}: "{otherNote}"</div>}
+                      </div>
+                    )}
+
+                    {isWaitingOnMe && (
+                      <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+                        <button
+                          onClick={() => respondToPending(p.id, "approved", null)}
+                          disabled={respondingToPending?.id === p.id}
+                          style={{ background: "#7a9e87", border: "none", borderRadius: "4px", padding: "6px 14px", color: "#1a1714", fontSize: "12px", fontWeight: 700, cursor: "pointer", opacity: respondingToPending?.id === p.id ? 0.5 : 1, fontFamily: "'Lato', sans-serif" }}>
+                          ✓ Approve
+                        </button>
+                        <button
+                          onClick={() => {
+                            const note = prompt("Why are you rejecting? (this stays as a note for follow-up)");
+                            if (note !== null) respondToPending(p.id, "rejected", note || "");
+                          }}
+                          disabled={respondingToPending?.id === p.id}
+                          style={{ background: "none", border: "1px solid #d49a82", borderRadius: "4px", padding: "6px 14px", color: "#d49a82", fontSize: "12px", cursor: "pointer", opacity: respondingToPending?.id === p.id ? 0.5 : 1, fontFamily: "'Lato', sans-serif" }}>
+                          ✗ Reject
+                        </button>
+                      </div>
+                    )}
+                    {!isWaitingOnMe && (
+                      <div style={{ fontSize: "10px", color: "#4a4440", textAlign: "center", padding: "4px", fontStyle: "italic" }}>
+                        {myStatus === "approved" ? "You've approved — waiting on " + otherUser : myStatus === "rejected" ? "You rejected — needs follow-up" : "Awaiting response"}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+      
       {showDecisions && (
         <div onClick={() => setShowDecisions(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", justifyContent: "flex-end" }}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: "min(440px, 100%)", height: "100%", background: "#1d1a17", borderLeft: "1px solid #2a2622", display: "flex", flexDirection: "column", animation: "fadeUp 0.2s ease" }}>
