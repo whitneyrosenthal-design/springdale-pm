@@ -118,23 +118,47 @@ const fetchDriveFile = async (fileId) => {
   }
 };
 
-const appendDecisionToDoc = async (decision, loggedBy, costImpact, needsSignoff) => {
+// Helper: find the [RENO_DECISIONS_LOG_HERE] marker in the doc
+const findMarkerIndex = (doc, marker = "[RENO_DECISIONS_LOG_HERE]") => {
+  const content = doc.body?.content || [];
+  for (const el of content) {
+    if (!el.paragraph) continue;
+    for (const e of el.paragraph.elements || []) {
+      const text = e.textRun?.content || "";
+      if (text.includes(marker)) {
+        // Insert position is right after the marker line ends
+        return e.endIndex;
+      }
+    }
+  }
+  return null;
+};
+
+const appendDecisionToDoc = async (decision, loggedBy, costImpact, needsSignoff, isPending = false) => {
   if (!googleAuth || !process.env.MASTER_DOC_ID) return { error: "no auth" };
   try {
     const docs = google.docs({ version: "v1", auth: googleAuth });
     const docMeta = await docs.documents.get({ documentId: process.env.MASTER_DOC_ID });
-    const endIndex = docMeta.data.body.content[docMeta.data.body.content.length - 1].endIndex - 1;
+
+    // Try to find the marker; fall back to end of document if not found
+    const markerIndex = findMarkerIndex(docMeta.data);
+    const insertIndex = markerIndex !== null
+      ? markerIndex
+      : docMeta.data.body.content[docMeta.data.body.content.length - 1].endIndex - 1;
+
     const date = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
     const cost = costImpact ? ` – £${costImpact}` : "";
     const flag = needsSignoff ? " ⚠️ NEEDS SIGN-OFF" : "";
-    const entry = `\n[${date}] ${loggedBy}: ${decision}${cost}${flag}`;
+    const prefix = isPending ? "⏳ PENDING" : "✅";
+    const entry = `\n${prefix} [${date}] ${loggedBy}: ${decision}${cost}${flag}`;
+
     await docs.documents.batchUpdate({
       documentId: process.env.MASTER_DOC_ID,
       requestBody: {
-        requests: [{ insertText: { location: { index: endIndex }, text: entry } }],
+        requests: [{ insertText: { location: { index: insertIndex }, text: entry } }],
       },
     });
-    return { ok: true };
+    return { ok: true, used_marker: markerIndex !== null };
   } catch (e) {
     console.error("Doc append error:", e.message);
     return { error: e.message };
@@ -336,6 +360,17 @@ module.exports = async (req, res) => {
         ...initialState,
       }).select();
       if (error) return res.status(500).json({ error: error.message });
+      // Also write pending entry to master doc
+      if (googleAuth && process.env.MASTER_DOC_ID) {
+        const deadlineSuffix = deadline ? ` [due ${deadline}]` : "";
+        await appendDecisionToDoc(
+          decision + deadlineSuffix + " (awaiting both sign-offs)",
+          `proposed by ${proposed_by}`,
+          cost_impact,
+          true,
+          true // isPending
+        );
+      }
       return res.status(200).json({ ok: true, pending: data?.[0] });
     } catch (e) {
       return res.status(500).json({ error: e.message });
@@ -372,13 +407,14 @@ module.exports = async (req, res) => {
           source: "pending_approved",
           logged_by: "Whitney + Charlie",
         });
-        // Append to master doc as well
+        // Append to master doc as well — final decision, not pending
         if (googleAuth && process.env.MASTER_DOC_ID) {
           await appendDecisionToDoc(
             item.decision + " (jointly approved)",
             "Whitney + Charlie",
             item.cost_impact,
-            false
+            false,
+            false // isPending = false (this is now final)
           );
         }
         return res.status(200).json({ ok: true, finalized: true, item });
