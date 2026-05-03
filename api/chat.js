@@ -199,6 +199,10 @@ Write the updated summary now.`;
     const stableSystem = system + driveBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
     const dynamicSystem = memoryBlock + summaryBlock;
 
+      debug.stable_system_length = stableSystem.length;
+    debug.stable_system_first_50 = stableSystem.slice(0, 50);
+    debug.stable_system_last_50 = stableSystem.slice(-50);
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
