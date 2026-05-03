@@ -48,7 +48,25 @@ FORMAT:
 - Flag decisions with: JOINT DECISION NEEDED or NOTE FOR WHITNEY
 - Flag eco options with a leaf emoji
 - Flag timeline risks with: TIMELINE RISK
-- Keep budget tracking visible when relevant`;
+- Keep budget tracking visible when relevant
+
+FILE ATTACHMENTS — IMPORTANT:
+When a user attaches an image or PDF to their message, you must ALWAYS write a thorough description of what's in the file at the START of your response, even if they didn't explicitly ask for one. This description becomes the permanent record — the file itself is NOT saved.
+
+For images (photos, screenshots, samples):
+- Describe what's shown in detail (e.g. "tile sample: matte-finish dark grey porcelain hexagons, ~150mm wide, with subtle texture")
+- Note any text, prices, dimensions, brand names visible
+- Note the lighting conditions if relevant for colour judgements
+- Then proceed to whatever the user asked
+
+For PDFs (quotes, surveys, plans):
+- Identify what kind of document it is (quote, survey, drawing, contract, etc.)
+- Extract key data: prices, dates, dimensions, vendor name, key clauses
+- Summarise the main points in 3-5 bullet points
+- Flag anything unusual or risky
+- Then proceed to whatever the user asked
+
+Format the description as a clear "📎 FILE NOTED:" section at the top of your reply so it's easy to find later.`;
 
 const USERS = {
   Whitney: { color: "#c4a882", initial: "W", accent: "#e8d5b7" },
@@ -359,10 +377,7 @@ export default function App() {
       setMessages((prev) => [...prev, assistantMsg]);
       await saveMessage("assistant", cleanText, "RENO");
 
-      // Show save-to-drive prompt if files were attached
-      if (filesForThisMessage.length > 0) {
-        setPendingDriveSave({ files: filesForThisMessage });
-      }
+      
     } catch (err) {
       const errMsg = { role: "assistant", content: "Connection error — please try again.", timestamp: new Date() };
       setMessages((prev) => [...prev, errMsg]);
@@ -540,22 +555,7 @@ export default function App() {
           );
         })}
 
-        {pendingDriveSave && (
-          <div style={{ background: "#252118", border: "1px solid #c4a88244", borderRadius: "8px", padding: "12px 14px", margin: "0 0 14px 35px", maxWidth: "84%" }}>
-            <div style={{ fontSize: "12px", color: "#c4a882", marginBottom: "8px" }}>📁 Save {pendingDriveSave.files.length} file{pendingDriveSave.files.length > 1 ? "s" : ""} to Drive folder?</div>
-            <div style={{ fontSize: "11px", color: "#5a5248", marginBottom: "10px" }}>
-              {pendingDriveSave.files.map((f) => f.name).join(", ")}
-            </div>
-            <div style={{ display: "flex", gap: "8px" }}>
-              <button className="save-yes" onClick={handleSaveToDrive} style={{ background: "#c4a882", border: "none", borderRadius: "4px", padding: "5px 14px", color: "#1a1714", fontSize: "12px", fontWeight: 700, cursor: "pointer", transition: "background 0.15s" }}>
-                Yes, save
-              </button>
-              <button className="save-no" onClick={() => setPendingDriveSave(null)} style={{ background: "none", border: "1px solid #3a3530", borderRadius: "4px", padding: "5px 14px", color: "#7a6e62", fontSize: "12px", cursor: "pointer", transition: "background 0.15s" }}>
-                No, skip
-              </button>
-            </div>
-          </div>
-        )}
+        
 
         {loading && (
           <div className="msg-bubble" style={{ display: "flex", gap: "9px", marginBottom: "14px" }}>
@@ -572,15 +572,20 @@ export default function App() {
 
       <div style={{ padding: "10px 14px 14px", borderTop: "1px solid #252118", background: "#1b1814" }}>
         {pendingFiles.length > 0 && (
-          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "8px" }}>
-            {pendingFiles.map((f, idx) => (
-              <div key={idx} style={{ background: "#252118", border: "1px solid #c4a88244", borderRadius: "6px", padding: "4px 8px 4px 10px", display: "flex", alignItems: "center", gap: "8px", fontSize: "11px", color: "#c4a882" }}>
-                <span>{f.isPdf ? "📄" : "🖼"}</span>
-                <span style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
-                <button onClick={() => removePendingFile(idx)} style={{ background: "none", border: "none", color: "#5a5248", cursor: "pointer", padding: "0 2px", fontSize: "14px", lineHeight: 1 }}>×</button>
-              </div>
-            ))}
-          </div>
+          <>
+            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "4px" }}>
+              {pendingFiles.map((f, idx) => (
+                <div key={idx} style={{ background: "#252118", border: "1px solid #c4a88244", borderRadius: "6px", padding: "4px 8px 4px 10px", display: "flex", alignItems: "center", gap: "8px", fontSize: "11px", color: "#c4a882" }}>
+                  <span>{f.isPdf ? "📄" : "🖼"}</span>
+                  <span style={{ maxWidth: "120px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
+                  <button onClick={() => removePendingFile(idx)} style={{ background: "none", border: "none", color: "#5a5248", cursor: "pointer", padding: "0 2px", fontSize: "14px", lineHeight: 1 }}>×</button>
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: "10px", color: "#4a4440", marginBottom: "8px", paddingLeft: "2px", lineHeight: 1.4 }}>
+              ℹ️ Files aren't saved — drag to Drive folder if you want a permanent copy
+            </div>
+          </>
         )}
         <div style={{ display: "flex", gap: "9px", alignItems: "flex-end", background: "#201e1a", border: "1px solid #2a2622", borderRadius: "8px", padding: "9px 11px" }}>
           <button className="clip-btn" onClick={() => fileInputRef.current?.click()} style={{ background: "none", border: "none", color: "#7a6e62", fontSize: "16px", cursor: "pointer", padding: "0 4px", flexShrink: 0, transition: "color 0.15s" }}>
