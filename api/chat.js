@@ -26,6 +26,8 @@ try {
   console.error("Google auth setup error:", e.message);
 }
 
+// 5-minute Drive cache instead of 60s
+const CACHE_TTL_MS = 5 * 60 * 1000;
 const cache = { masterDoc: null, budgetSheet: null, ts: 0 };
 
 const fetchMasterDoc = async () => {
@@ -54,19 +56,19 @@ const fetchBudgetSheet = async () => {
     const sheets = google.sheets({ version: "v4", auth: googleAuth });
     const meta = await sheets.spreadsheets.get({ spreadsheetId: process.env.BUDGET_SHEET_ID });
     const tabs = meta.data.sheets || [];
-    const allTabs = [];
-    for (const tab of tabs) {
+    // Fetch all tabs in parallel
+    const tabPromises = tabs.map(async (tab) => {
       const tabName = tab.properties?.title || "Sheet";
       const res = await sheets.spreadsheets.values.get({
         spreadsheetId: process.env.BUDGET_SHEET_ID,
         range: tabName,
       });
       const rows = res.data.values || [];
-      if (rows.length === 0) continue;
-      const formatted = rows.map((r) => r.join(" | ")).join("\n");
-      allTabs.push(`--- TAB: ${tabName} ---\n${formatted}`);
-    }
-    return allTabs.join("\n\n");
+      if (rows.length === 0) return null;
+      return `--- TAB: ${tabName} ---\n${rows.map((r) => r.join(" | ")).join("\n")}`;
+    });
+    const results = await Promise.all(tabPromises);
+    return results.filter(Boolean).join("\n\n");
   } catch (e) {
     console.error("Budget sheet fetch error:", e.message);
     return `[Error fetching budget sheet: ${e.message}]`;
@@ -105,8 +107,9 @@ const fetchDriveFile = async (fileId) => {
       return { name, mimeType, error: `Unsupported type: ${mimeType}` };
     }
 
-    if (size && parseInt(size) > 10 * 1024 * 1024) {
-      return { name, mimeType, error: `File too large (${Math.round(size / 1024 / 1024)}MB, limit 10MB)` };
+    // Tighter 5MB limit to avoid timeouts on free tier
+    if (size && parseInt(size) > 5 * 1024 * 1024) {
+      return { name, mimeType, error: `File too large (${Math.round(size / 1024 / 1024)}MB, free tier limit 5MB). The file is shared but cannot be visually read in this chat.` };
     }
 
     const fileRes = await drive.files.get(
@@ -177,36 +180,46 @@ const appendLineItemToSheet = async ({ category, room, item, vendor, status, est
   }
 };
 
-const generateSummary = async (existingSummary, messagesToFold) => {
-  const summaryPrompt = `You are summarising a renovation project chat between Whitney, Charlie, and RENO. Produce a concise rolling summary (under 400 words, bullet points) capturing key topics, decisions, open questions, contractors mentioned, and any tensions. Do NOT repeat the decision log — focus on context and unresolved items.
+// Background summary regen (fire-and-forget)
+const triggerSummaryRegenInBackground = async (latestSummaryText, foldThese, lastFoldedMsg, latestSummaryCovered) => {
+  // Don't await — let it run in background
+  (async () => {
+    try {
+      const summaryPrompt = `You are summarising a renovation project chat between Whitney, Charlie, and RENO. Produce a concise rolling summary (under 400 words, bullet points) capturing key topics, decisions, open questions, contractors mentioned, and any tensions. Do NOT repeat the decision log — focus on context and unresolved items.
 
-${existingSummary ? `\nEXISTING SUMMARY (extend with the new messages below):\n${existingSummary}\n` : ""}
+${latestSummaryText ? `\nEXISTING SUMMARY (extend with the new messages below):\n${latestSummaryText}\n` : ""}
 
 NEW MESSAGES:
-${messagesToFold.map((m) => `[${m.user_name}]: ${m.content}`).join("\n\n")}
+${foldThese.map((m) => `[${m.user_name}]: ${m.content}`).join("\n\n")}
 
 Write the updated summary now.`;
 
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 800,
-        messages: [{ role: "user", content: summaryPrompt }],
-      }),
-    });
-    const data = await response.json();
-    return data.content?.[0]?.text || null;
-  } catch (e) {
-    console.error("Summary generation error:", e.message);
-    return null;
-  }
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 800,
+          messages: [{ role: "user", content: summaryPrompt }],
+        }),
+      });
+      const data = await response.json();
+      const newSummaryText = data.content?.[0]?.text;
+      if (newSummaryText) {
+        await supabase.from("summaries").insert({
+          summary_text: newSummaryText,
+          messages_covered: (latestSummaryCovered || 0) + foldThese.length,
+          last_message_at: lastFoldedMsg.created_at,
+        });
+      }
+    } catch (e) {
+      console.error("Background summary error:", e.message);
+    }
+  })();
 };
 
 const SUMMARY_THRESHOLD = 30;
@@ -271,58 +284,82 @@ module.exports = async (req, res) => {
     supabase_configured: !!supabase,
     google_configured: !!googleAuth,
   };
+  const startTime = Date.now();
 
   try {
     const { messages, system } = req.body;
 
+    // Detect Drive URLs in the latest user message
+    let detectedFileIds = [];
+    if (googleAuth && messages.length > 0) {
+      const latestMsg = messages[messages.length - 1];
+      const latestContent = typeof latestMsg.content === "string" ? latestMsg.content : "";
+      detectedFileIds = extractDriveFileIds(latestContent).slice(0, 2); // max 2 files to limit cost
+    }
+    debug.detected_drive_urls = detectedFileIds.length;
+
+    // Run Drive content fetch + Supabase queries + file fetching ALL IN PARALLEL
+    const driveContentPromise = (googleAuth && (Date.now() - cache.ts > CACHE_TTL_MS || !cache.masterDoc))
+      ? Promise.all([fetchMasterDoc(), fetchBudgetSheet()]).then(([d, s]) => {
+          cache.masterDoc = d;
+          cache.budgetSheet = s;
+          cache.ts = Date.now();
+          return [d, s];
+        })
+      : Promise.resolve([cache.masterDoc, cache.budgetSheet]);
+
+    const supabasePromise = supabase
+      ? Promise.all([
+          supabase.from("decisions").select("*").order("created_at", { ascending: false }).limit(30),
+          supabase.from("summaries").select("*").order("created_at", { ascending: false }).limit(1),
+        ])
+      : Promise.resolve([{ data: [] }, { data: [] }]);
+
+    const filesPromise = detectedFileIds.length > 0
+      ? Promise.all(detectedFileIds.map(fetchDriveFile))
+      : Promise.resolve([]);
+
+    const [[masterDocContent, budgetSheetContent], [decisionsRes, summaryRes], fetchedFiles] =
+      await Promise.all([driveContentPromise, supabasePromise, filesPromise]);
+
+    debug.parallel_fetch_ms = Date.now() - startTime;
+
+    // Build drive block
     let driveBlock = "";
-    const now = Date.now();
-    if (googleAuth && (now - cache.ts > 60000 || !cache.masterDoc)) {
-      const [docContent, sheetContent] = await Promise.all([
-        fetchMasterDoc(),
-        fetchBudgetSheet(),
-      ]);
-      cache.masterDoc = docContent;
-      cache.budgetSheet = sheetContent;
-      cache.ts = now;
+    if (masterDocContent) {
+      driveBlock += `\n\n=== LIVE MASTER DOCUMENT ===\n${masterDocContent}\n=== END MASTER DOCUMENT ===\n`;
+      debug.master_doc_chars = masterDocContent.length;
     }
-    if (cache.masterDoc) {
-      driveBlock += `\n\n=== LIVE MASTER DOCUMENT ===\n${cache.masterDoc}\n=== END MASTER DOCUMENT ===\n`;
-      debug.master_doc_chars = cache.masterDoc.length;
-    }
-    if (cache.budgetSheet) {
-      driveBlock += `\n\n=== LIVE BUDGET SHEET ===\n${cache.budgetSheet}\n=== END BUDGET SHEET ===\n`;
-      debug.budget_sheet_chars = cache.budgetSheet.length;
+    if (budgetSheetContent) {
+      driveBlock += `\n\n=== LIVE BUDGET SHEET ===\n${budgetSheetContent}\n=== END BUDGET SHEET ===\n`;
+      debug.budget_sheet_chars = budgetSheetContent.length;
     }
 
+    // Build memory + summary blocks
     let memoryBlock = "";
     let summaryBlock = "";
+    const decisionsData = decisionsRes.data || [];
+    debug.decisions_count = decisionsData.length;
+    if (decisionsData.length > 0) {
+      memoryBlock = "\n\n=== DECISION LOG (most recent first) ===\n";
+      decisionsData.forEach((d) => {
+        const date = new Date(d.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+        const cost = d.cost_impact ? ` [£${d.cost_impact}]` : "";
+        const signoff = d.needs_signoff ? " ⚠️ NEEDS SIGN-OFF" : "";
+        memoryBlock += `- ${date} (${d.logged_by})${cost}${signoff}: ${d.decision}\n`;
+      });
+      memoryBlock += "=== END DECISION LOG ===\n";
+    }
+
+    const latestSummary = summaryRes.data?.[0];
+    if (latestSummary?.summary_text) {
+      summaryBlock = `\n\n=== ROLLING CONVERSATION SUMMARY ===\n${latestSummary.summary_text}\n=== END SUMMARY ===\n`;
+      debug.has_summary = true;
+    }
+
+    // Trigger background summary regen if needed (fire-and-forget, doesn't block)
     if (supabase) {
       try {
-        const { data: decisionsData } = await supabase
-          .from("decisions").select("*")
-          .order("created_at", { ascending: false }).limit(50);
-        debug.decisions_count = decisionsData?.length || 0;
-        if (decisionsData && decisionsData.length > 0) {
-          memoryBlock = "\n\n=== DECISION LOG (most recent first) ===\n";
-          decisionsData.forEach((d) => {
-            const date = new Date(d.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
-            const cost = d.cost_impact ? ` [£${d.cost_impact}]` : "";
-            const signoff = d.needs_signoff ? " ⚠️ NEEDS SIGN-OFF" : "";
-            memoryBlock += `- ${date} (${d.logged_by})${cost}${signoff}: ${d.decision}\n`;
-          });
-          memoryBlock += "=== END DECISION LOG ===\n";
-        }
-
-        const { data: summaryData } = await supabase
-          .from("summaries").select("*")
-          .order("created_at", { ascending: false }).limit(1);
-        const latestSummary = summaryData?.[0];
-        if (latestSummary?.summary_text) {
-          summaryBlock = `\n\n=== ROLLING CONVERSATION SUMMARY ===\n${latestSummary.summary_text}\n=== END SUMMARY ===\n`;
-          debug.has_summary = true;
-        }
-
         const sinceTimestamp = latestSummary?.last_message_at || "1970-01-01";
         const { count: newMessagesCount } = await supabase
           .from("messages")
@@ -339,41 +376,26 @@ module.exports = async (req, res) => {
 
           if (messagesToFold && messagesToFold.length > 10) {
             const foldThese = messagesToFold.slice(0, messagesToFold.length - 10);
-            const newSummaryText = await generateSummary(latestSummary?.summary_text || null, foldThese);
-            if (newSummaryText) {
-              const lastFoldedMsg = foldThese[foldThese.length - 1];
-              await supabase.from("summaries").insert({
-                summary_text: newSummaryText,
-                messages_covered: (latestSummary?.messages_covered || 0) + foldThese.length,
-                last_message_at: lastFoldedMsg.created_at,
-              });
-              summaryBlock = `\n\n=== ROLLING CONVERSATION SUMMARY ===\n${newSummaryText}\n=== END SUMMARY ===\n`;
-              debug.summary_regenerated = true;
-            }
+            // Fire-and-forget — don't await this
+            triggerSummaryRegenInBackground(
+              latestSummary?.summary_text || null,
+              foldThese,
+              foldThese[foldThese.length - 1],
+              latestSummary?.messages_covered || 0
+            );
+            debug.summary_regen_triggered = true;
           }
         }
       } catch (e) {
-        debug.supabase_error = e.message;
+        debug.summary_check_error = e.message;
       }
     }
 
-    let attachedFiles = [];
-    if (googleAuth && messages.length > 0) {
-      const latestMsg = messages[messages.length - 1];
-      const latestContent = typeof latestMsg.content === "string" ? latestMsg.content : "";
-      const fileIds = extractDriveFileIds(latestContent);
-      debug.detected_drive_urls = fileIds.length;
-      for (const fileId of fileIds.slice(0, 3)) {
-        const file = await fetchDriveFile(fileId);
-        if (file && !file.error) {
-          attachedFiles.push(file);
-        } else if (file?.error) {
-          debug.file_fetch_errors = debug.file_fetch_errors || [];
-          debug.file_fetch_errors.push({ fileId, error: file.error });
-        }
-      }
-      debug.files_attached = attachedFiles.length;
-    }
+    // Filter attached files for those that succeeded
+    const attachedFiles = fetchedFiles.filter((f) => f && !f.error);
+    const fileErrors = fetchedFiles.filter((f) => f?.error);
+    debug.files_attached = attachedFiles.length;
+    if (fileErrors.length > 0) debug.file_fetch_errors = fileErrors.map((f) => f.error);
 
     const fullSystem = system + driveBlock + summaryBlock + memoryBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
 
@@ -393,11 +415,17 @@ module.exports = async (req, res) => {
             });
           }
         }
-        contentBlocks.push({ type: "text", text: m.content });
+        let textContent = m.content;
+        if (fileErrors.length > 0) {
+          textContent += `\n\n[Note: ${fileErrors.length} file(s) could not be loaded: ${fileErrors.map((f) => f.error).join("; ")}]`;
+        }
+        contentBlocks.push({ type: "text", text: textContent });
         return { role: m.role, content: contentBlocks };
       }
       return m;
     });
+
+    debug.pre_anthropic_ms = Date.now() - startTime;
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -415,6 +443,7 @@ module.exports = async (req, res) => {
     });
 
     const data = await response.json();
+    debug.total_ms = Date.now() - startTime;
     data._debug = debug;
 
     return res.status(200).json(data);
