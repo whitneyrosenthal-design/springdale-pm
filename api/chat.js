@@ -281,6 +281,85 @@ module.exports = async (req, res) => {
       return res.status(500).json({ error: e.message });
     }
   }
+
+  if (action === "brief") {
+    if (!supabase) return res.status(500).json({ error: "Supabase not configured" });
+    try {
+      const targetUser = req.body.user;
+
+      // Get last 7 days of decisions
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const { data: recentDecisions } = await supabase
+        .from("decisions").select("*")
+        .gte("created_at", sevenDaysAgo)
+        .order("created_at", { ascending: false });
+
+      // Get last 30 messages from chat history
+      const { data: recentMessages } = await supabase
+        .from("messages").select("*")
+        .order("created_at", { ascending: false })
+        .limit(30);
+
+      // Build the briefing prompt
+      const decisionsBlock = recentDecisions && recentDecisions.length > 0
+        ? recentDecisions.map(d => {
+            const date = new Date(d.created_at).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+            const cost = d.cost_impact ? ` (£${d.cost_impact})` : "";
+            const signoff = d.needs_signoff ? " ⚠️ NEEDS SIGN-OFF" : "";
+            return `- [${date}] ${d.logged_by}${cost}${signoff}: ${d.decision}`;
+          }).join("\n")
+        : "(no decisions logged in the last 7 days)";
+
+      const messagesBlock = recentMessages && recentMessages.length > 0
+        ? recentMessages.reverse().map(m => `[${m.user_name}]: ${m.content}`).join("\n\n")
+        : "(no recent messages)";
+
+      const briefingPrompt = `You are RENO. Generate a personalised briefing for ${targetUser} (one of two project owners — Whitney and Charlie).
+
+The briefing should be SHORT and FOCUSED. Format:
+
+**Welcome back, ${targetUser}.**
+
+📋 **What's been decided** (last 7 days)
+[Bullet list of 3-7 most relevant recent decisions. Skip if none.]
+
+🔄 **Open threads waiting on you**
+[Things ${targetUser} should respond to or take action on, based on chat history. Look for: questions directed at them, decisions that need their sign-off, things the OTHER person flagged or asked about that ${targetUser} hasn't responded to.]
+
+📝 **You should give an update on**
+[Things ${targetUser} previously committed to or is researching, based on chat history. Examples: contractor quotes they were getting, surveys they were booking, decisions they said they'd think about.]
+
+Keep it tight. Maximum 200 words total. If a section has nothing, skip it entirely. Don't repeat decisions in multiple sections.
+
+=== RECENT DECISIONS ===
+${decisionsBlock}
+
+=== RECENT CHAT HISTORY ===
+${messagesBlock}
+
+Generate the briefing now for ${targetUser}.`;
+
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 700,
+          messages: [{ role: "user", content: briefingPrompt }],
+        }),
+      });
+      const data = await response.json();
+      const briefing = data.content?.[0]?.text || "Couldn't generate briefing.";
+      return res.status(200).json({ briefing });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
+  
   const debug = {
     supabase_configured: !!supabase,
     google_configured: !!googleAuth,
