@@ -1,5 +1,3 @@
-// Force rebuild 2026-05-03
-
 const { createClient } = require("@supabase/supabase-js");
 const { google } = require("googleapis");
 
@@ -28,7 +26,6 @@ try {
   console.error("Google auth setup error:", e.message);
 }
 
-// 5-minute Drive cache instead of 60s
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const cache = { masterDoc: null, budgetSheet: null, ts: 0 };
 
@@ -58,7 +55,6 @@ const fetchBudgetSheet = async () => {
     const sheets = google.sheets({ version: "v4", auth: googleAuth });
     const meta = await sheets.spreadsheets.get({ spreadsheetId: process.env.BUDGET_SHEET_ID });
     const tabs = meta.data.sheets || [];
-    // Fetch all tabs in parallel
     const tabPromises = tabs.map(async (tab) => {
       const tabName = tab.properties?.title || "Sheet";
       const res = await sheets.spreadsheets.values.get({
@@ -102,18 +98,14 @@ const fetchDriveFile = async (fileId) => {
       fields: "id, name, mimeType, size",
     });
     const { name, mimeType, size } = meta.data;
-
     const supportedImage = ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mimeType);
     const isPdf = mimeType === "application/pdf";
     if (!supportedImage && !isPdf) {
       return { name, mimeType, error: `Unsupported type: ${mimeType}` };
     }
-
-    // Tighter 5MB limit to avoid timeouts on free tier
     if (size && parseInt(size) > 5 * 1024 * 1024) {
-      return { name, mimeType, error: `File too large (${Math.round(size / 1024 / 1024)}MB, free tier limit 5MB). The file is shared but cannot be visually read in this chat.` };
+      return { name, mimeType, error: `File too large (${Math.round(size / 1024 / 1024)}MB, limit 5MB).` };
     }
-
     const fileRes = await drive.files.get(
       { fileId, alt: "media" },
       { responseType: "arraybuffer" }
@@ -155,19 +147,9 @@ const appendLineItemToSheet = async ({ category, room, item, vendor, status, est
     const sheets = google.sheets({ version: "v4", auth: googleAuth });
     const date = new Date().toLocaleDateString("en-GB");
     const row = [
-      date,
-      category || "",
-      room || "",
-      item || "",
-      vendor || "",
-      status || "Estimating",
-      estimate || "",
-      quote || "",
-      actual || "",
-      20,
-      "",
-      decided_by || "",
-      notes || "",
+      date, category || "", room || "", item || "", vendor || "",
+      status || "Estimating", estimate || "", quote || "", actual || "",
+      20, "", decided_by || "", notes || "",
     ];
     await sheets.spreadsheets.values.append({
       spreadsheetId: process.env.BUDGET_SHEET_ID,
@@ -182,9 +164,7 @@ const appendLineItemToSheet = async ({ category, room, item, vendor, status, est
   }
 };
 
-// Background summary regen (fire-and-forget)
-const triggerSummaryRegenInBackground = async (latestSummaryText, foldThese, lastFoldedMsg, latestSummaryCovered) => {
-  // Don't await — let it run in background
+const triggerSummaryRegenInBackground = (latestSummaryText, foldThese, lastFoldedMsg, latestSummaryCovered) => {
   (async () => {
     try {
       const summaryPrompt = `You are summarising a renovation project chat between Whitney, Charlie, and RENO. Produce a concise rolling summary (under 400 words, bullet points) capturing key topics, decisions, open questions, contractors mentioned, and any tensions. Do NOT repeat the decision log — focus on context and unresolved items.
@@ -196,37 +176,19 @@ ${foldThese.map((m) => `[${m.user_name}]: ${m.content}`).join("\n\n")}
 
 Write the updated summary now.`;
 
-     // Build a TRULY stable system prefix (only changes when master doc/budget sheet/project context change)
-    // Decisions and summary stay OUTSIDE the cache because they update every message
-    const stableSystem = system + driveBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
-    const dynamicSystem = memoryBlock + summaryBlock;
-
-      debug.stable_system_length = stableSystem.length;
-    debug.stable_system_first_50 = stableSystem.slice(0, 50);
-    debug.stable_system_last_50 = stableSystem.slice(-50);
-
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": process.env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-"anthropic-beta": "prompt-caching-2024-07-31",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1500,
-        system: [
-          {
-            type: "text",
-            text: stableSystem,
-            cache_control: { type: "ephemeral" },
-          },
-          ...(dynamicSystem ? [{ type: "text", text: dynamicSystem }] : []),
-        ],
-        messages: apiMessages,
-      }),
-    });
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": process.env.ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5-20251001",
+          max_tokens: 800,
+          messages: [{ role: "user", content: summaryPrompt }],
+        }),
+      });
       const data = await response.json();
       const newSummaryText = data.content?.[0]?.text;
       if (newSummaryText) {
@@ -251,7 +213,7 @@ You have LIVE READ AND WRITE ACCESS to two Google files:
 1. The master project document (injected as "LIVE MASTER DOCUMENT")
 2. The budget spreadsheet (injected as "LIVE BUDGET SHEET")
 
-You can ALSO read files from Google Drive when their URL is shared in the message — they will be attached as content blocks (images/PDFs) for you to actually see.
+You can ALSO read files from Google Drive when their URL is shared — they will be attached as content blocks for you to actually see.
 
 DO NOT claim you cannot access these documents — you can. The content is right there.
 === END LIVE DATA ACCESS ===
@@ -285,13 +247,9 @@ module.exports = async (req, res) => {
   }
 
   const action = req.query?.action;
-
   if (action === "write_decision") {
     const result = await appendDecisionToDoc(
-      req.body.decision,
-      req.body.logged_by,
-      req.body.cost_impact,
-      req.body.needs_signoff
+      req.body.decision, req.body.logged_by, req.body.cost_impact, req.body.needs_signoff
     );
     return res.status(200).json(result);
   }
@@ -309,16 +267,14 @@ module.exports = async (req, res) => {
   try {
     const { messages, system } = req.body;
 
-    // Detect Drive URLs in the latest user message
     let detectedFileIds = [];
     if (googleAuth && messages.length > 0) {
       const latestMsg = messages[messages.length - 1];
       const latestContent = typeof latestMsg.content === "string" ? latestMsg.content : "";
-      detectedFileIds = extractDriveFileIds(latestContent).slice(0, 2); // max 2 files to limit cost
+      detectedFileIds = extractDriveFileIds(latestContent).slice(0, 2);
     }
     debug.detected_drive_urls = detectedFileIds.length;
 
-    // Run Drive content fetch + Supabase queries + file fetching ALL IN PARALLEL
     const driveContentPromise = (googleAuth && (Date.now() - cache.ts > CACHE_TTL_MS || !cache.masterDoc))
       ? Promise.all([fetchMasterDoc(), fetchBudgetSheet()]).then(([d, s]) => {
           cache.masterDoc = d;
@@ -344,7 +300,6 @@ module.exports = async (req, res) => {
 
     debug.parallel_fetch_ms = Date.now() - startTime;
 
-    // Build drive block
     let driveBlock = "";
     if (masterDocContent) {
       driveBlock += `\n\n=== LIVE MASTER DOCUMENT ===\n${masterDocContent}\n=== END MASTER DOCUMENT ===\n`;
@@ -355,7 +310,6 @@ module.exports = async (req, res) => {
       debug.budget_sheet_chars = budgetSheetContent.length;
     }
 
-    // Build memory + summary blocks
     let memoryBlock = "";
     let summaryBlock = "";
     const decisionsData = decisionsRes.data || [];
@@ -377,7 +331,6 @@ module.exports = async (req, res) => {
       debug.has_summary = true;
     }
 
-    // Trigger background summary regen if needed (fire-and-forget, doesn't block)
     if (supabase) {
       try {
         const sinceTimestamp = latestSummary?.last_message_at || "1970-01-01";
@@ -389,14 +342,12 @@ module.exports = async (req, res) => {
 
         if ((newMessagesCount || 0) >= SUMMARY_THRESHOLD) {
           const { data: messagesToFold } = await supabase
-            .from("messages")
-            .select("*")
+            .from("messages").select("*")
             .gt("created_at", sinceTimestamp)
             .order("created_at", { ascending: true });
 
           if (messagesToFold && messagesToFold.length > 10) {
             const foldThese = messagesToFold.slice(0, messagesToFold.length - 10);
-            // Fire-and-forget — don't await this
             triggerSummaryRegenInBackground(
               latestSummary?.summary_text || null,
               foldThese,
@@ -411,13 +362,16 @@ module.exports = async (req, res) => {
       }
     }
 
-    // Filter attached files for those that succeeded
     const attachedFiles = fetchedFiles.filter((f) => f && !f.error);
     const fileErrors = fetchedFiles.filter((f) => f?.error);
     debug.files_attached = attachedFiles.length;
     if (fileErrors.length > 0) debug.file_fetch_errors = fileErrors.map((f) => f.error);
 
-    const fullSystem = system + driveBlock + summaryBlock + memoryBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
+    // ===== Cache structure (the actual cached call) =====
+    const stableSystem = system + driveBlock + LIVE_DATA_INSTRUCTION + TAG_INSTRUCTION;
+    const dynamicSystem = memoryBlock + summaryBlock;
+    debug.stable_system_length = stableSystem.length;
+    debug.dynamic_system_length = dynamicSystem.length;
 
     const apiMessages = messages.map((m, i) => {
       if (i === messages.length - 1 && attachedFiles.length > 0 && m.role === "user") {
@@ -437,7 +391,7 @@ module.exports = async (req, res) => {
         }
         let textContent = m.content;
         if (fileErrors.length > 0) {
-          textContent += `\n\n[Note: ${fileErrors.length} file(s) could not be loaded: ${fileErrors.map((f) => f.error).join("; ")}]`;
+          textContent += `\n\n[Note: ${fileErrors.length} file(s) could not be loaded.]`;
         }
         contentBlocks.push({ type: "text", text: textContent });
         return { role: m.role, content: contentBlocks };
@@ -457,7 +411,14 @@ module.exports = async (req, res) => {
       body: JSON.stringify({
         model: "claude-sonnet-4-6",
         max_tokens: 1500,
-        system: fullSystem,
+        system: [
+          {
+            type: "text",
+            text: stableSystem,
+            cache_control: { type: "ephemeral" },
+          },
+          ...(dynamicSystem ? [{ type: "text", text: dynamicSystem }] : []),
+        ],
         messages: apiMessages,
       }),
     });
