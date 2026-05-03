@@ -1,3 +1,5 @@
+// Force rebuild 2026-05-03
+
 const { createClient } = require("@supabase/supabase-js");
 const { google } = require("googleapis");
 
