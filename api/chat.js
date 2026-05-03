@@ -258,6 +258,29 @@ module.exports = async (req, res) => {
     return res.status(200).json(result);
   }
 
+  if (action === "upload_to_drive") {
+    if (!googleAuth) return res.status(500).json({ error: "Drive not configured" });
+    try {
+      const { filename, mimeType, base64 } = req.body;
+      const drive = google.drive({ version: "v3", auth: googleAuth });
+      const buffer = Buffer.from(base64, "base64");
+      const { Readable } = require("stream");
+      const result = await drive.files.create({
+        requestBody: {
+          name: filename,
+          parents: process.env.DRIVE_FOLDER_ID ? [process.env.DRIVE_FOLDER_ID] : undefined,
+        },
+        media: {
+          mimeType,
+          body: Readable.from(buffer),
+        },
+        fields: "id, name, webViewLink",
+      });
+      return res.status(200).json({ ok: true, file: result.data });
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+  }
   const debug = {
     supabase_configured: !!supabase,
     google_configured: !!googleAuth,
@@ -373,10 +396,15 @@ module.exports = async (req, res) => {
     debug.stable_system_length = stableSystem.length;
     debug.dynamic_system_length = dynamicSystem.length;
 
+// Accept files passed directly from the app (in addition to Drive URLs)
+    const directlyUploadedFiles = req.body.uploadedFiles || [];
+    const allAttachedFiles = [...attachedFiles, ...directlyUploadedFiles];
+    debug.directly_uploaded = directlyUploadedFiles.length;
+    
     const apiMessages = messages.map((m, i) => {
-      if (i === messages.length - 1 && attachedFiles.length > 0 && m.role === "user") {
+      if (i === messages.length - 1 && allAttachedFiles.length > 0 && m.role === "user") {
         const contentBlocks = [];
-        for (const file of attachedFiles) {
+        for (const file of allAttachedFiles) {
           if (file.isPdf) {
             contentBlocks.push({
               type: "document",
